@@ -13,7 +13,7 @@ module.exports = {
   MAX_SESSIONS: 100,
 
   // ----- Firebase (session storage) -----
-  FIREBASE_DB_URL: '',                  // FILL: https://YOUR-PROJECT-default-rtdb.firebaseio.com
+  FIREBASE_DB_URL: 'https://viru-md-default-rtdb.firebaseio.com',                  // FILL: https://YOUR-PROJECT-default-rtdb.firebaseio.com
   FIREBASE_SECRET: '',                  // FILL: Firebase database secret
 
   // ----- Vote + React API -----
