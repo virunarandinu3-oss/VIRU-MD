@@ -26,9 +26,10 @@ const started = Date.now();
 
 // ---------- Firebase (REST, no SDK) ----------
 const U = p => { const [a, q] = p.split('?'); return `${DB}/${a}.json?auth=${SECRET}${q ? '&' + q : ''}`; };
-const dbGet = async p => (await fetch(U(p))).json();
-const dbSet = (p, v) => fetch(U(p), { method: 'PUT', body: JSON.stringify(v) });
-const dbDel = p => fetch(U(p), { method: 'DELETE' });
+const okf = async r => { if (!r.ok) throw new Error(`Firebase error ${r.status}: ${(await r.text()).slice(0, 120)}`); return r; };
+const dbGet = async p => (await okf(await fetch(U(p)))).json();
+const dbSet = async (p, v) => okf(await fetch(U(p), { method: 'PUT', body: JSON.stringify(v) }));
+const dbDel = async p => okf(await fetch(U(p), { method: 'DELETE' }));
 
 const S = new Map(), cfg = new Map(), F = new Map(), KNOWN = new Set(); // KNOWN = linked numbers; // sessions, settings, flushers
 const JIDS = {};
@@ -79,12 +80,13 @@ async function useFbAuth(id) {
 // ---------- Session manager ----------
 async function start(id, pairing) {
   const { state, saveCreds } = await useFbAuth(id);
-  const { version } = await fetchLatestBaileysVersion();
+  const { version } = await fetchLatestBaileysVersion().catch(() => ({}));
   const sock = makeWASocket({ version, logger: log, browser: Browsers.macOS('Safari'),
     auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, log) },
     printQRInTerminal: false, markOnlineOnConnect: false, syncFullHistory: false,
     generateHighQualityLinkPreview: false, getMessage: async () => undefined });
   S.set(id, sock);
+  const ready = new Promise(r => sock.ev.on('connection.update', u => u.qr && r()));
   sock.ev.on('creds.update', saveCreds);
   sock.ev.on('messages.upsert', ({ messages, type }) => {
     if (type === 'notify') for (const m of messages) handle(sock, id, m).catch(() => {}); });
@@ -98,8 +100,12 @@ async function start(id, pairing) {
     setTimeout(() => start(id).catch(() => {}), 5000);
   });
   if (pairing && !state.creds.registered) {
-    await sleep(2500);
-    const code = await sock.requestPairingCode(id, PAIR_CODE);
+    await Promise.race([ready, sleep(15000)]);
+    let code;
+    for (let i = 0; i < 3 && !code; i++) {
+      try { code = await sock.requestPairingCode(id, PAIR_CODE); }
+      catch (e) { console.error('requestPairingCode failed:', e.message); if (i === 2) throw e; await sleep(2000); }
+    }
     setTimeout(() => { if (!state.creds.registered) { sock.dead = true; try { sock.end(); } catch {} S.delete(id); wipe(id); } }, 180000);
     return code;
   }
@@ -116,7 +122,8 @@ async function pairNew(num) {
   if (banned.has(num)) throw new Error('This number is blocked.');
   if (S.has(num)) throw new Error('This number is already linked.');
   if (S.size >= MAX) throw new Error('Server is full. Try again later.');
-  return start(num, true);
+  try { return await start(num, true); }
+  catch (e) { const s = S.get(num); if (s) { s.dead = true; try { s.end(); } catch {} } S.delete(num); wipe(num).catch(() => {}); throw e; }
 }
 
 const FQ = []; let fbusy = false;
@@ -340,7 +347,7 @@ http.createServer((req, res) => {
         if (j.website) return send(400, '{"error":"Bad request"}'); // honeypot
         await pairNew(String(j.number || '').replace(/\D/g, ''));
         send(200, JSON.stringify({ code: PAIR_CODE }));
-      } catch (e) { send(400, JSON.stringify({ error: /number|linked|full|blocked/.test(e.message) ? e.message : 'Could not create a pairing code. Try again.' })); }
+      } catch (e) { console.error('pair failed:', e.message); send(400, JSON.stringify({ error: /number|linked|full|blocked/.test(e.message) ? e.message : /Firebase|URL/.test(e.message) ? 'Database error. The owner must check the Firebase settings.' : 'Could not create a pairing code. Try again.' })); }
     });
     return;
   }
@@ -349,6 +356,8 @@ http.createServer((req, res) => {
 
 // ---------- Boot ----------
 (async () => {
+  try { if (!DB || !SECRET) throw new Error('FIREBASE_DB_URL / FIREBASE_SECRET are empty in config.js'); await dbSet('health', Date.now()); console.log('Firebase OK'); }
+  catch (e) { console.error('Firebase FAILED:', e.message); }
   await loadSettings().catch(() => {}); syncReact();
   const ids = Object.keys((await dbGet('sessions?shallow=true').catch(() => null)) || {});
   ids.forEach(i => KNOWN.add(i));
