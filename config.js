@@ -14,7 +14,7 @@ module.exports = {
 
   // ----- Firebase (session storage) -----
   FIREBASE_DB_URL: 'https://viru-md-default-rtdb.firebaseio.com',                  // FILL: https://YOUR-PROJECT-default-rtdb.firebaseio.com
-  FIREBASE_SECRET: '',                  // FILL: Firebase database secret
+  FIREBASE_SECRET: '36cyKul2chcI7prFoR8CSYOKBrTRaRSXVhAd1pye',                  // FILL: Firebase database secret
 
   // ----- Vote + React API -----
   VOTE_API_BASE: 'https://viru-votes.vercel.app',
