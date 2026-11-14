@@ -1,7 +1,6 @@
 if (!globalThis.crypto) globalThis.crypto = require('crypto').webcrypto; // Baileys needs global crypto (Node 18)
 const http = require('http'), fs = require('fs'), path = require('path');
-const { default: makeWASocket, initAuthCreds, BufferJSON, proto, DisconnectReason, Browsers,
-  makeCacheableSignalKeyStore, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
+let makeWASocket, initAuthCreds, BufferJSON, proto, DisconnectReason, Browsers, makeCacheableSignalKeyStore, fetchLatestBaileysVersion; // loaded in boot (Baileys 7 is ESM)
 const log = require('pino')({ level: 'silent' });
 const E = { ...require('./config'), ...process.env }; // config.js holds everything; real env vars (if any) override
 const DB = (E.FIREBASE_DB_URL || '').replace(/\/$/, ''), SECRET = E.FIREBASE_SECRET || '';
@@ -201,12 +200,21 @@ async function verified(sock, link) {
   return meta;
 }
 
+async function senderOf(sock, id, m) { // WhatsApp now uses LIDs; find the real phone number
+  const k = m.key; if (k.fromMe) return id;
+  const who = k.participant || k.remoteJid, alt = k.participantAlt || k.remoteJidAlt;
+  const pn = [alt, who].find(j => j && j.endsWith('@s.whatsapp.net'));
+  if (pn) return num(pn);
+  try { const r = await sock.signalRepository?.lidMapping?.getPNForLID?.(who); if (r) return num(r); } catch {}
+  return num(who);
+}
+
 async function handle(sock, id, m) {
   const jid = m.key.remoteJid;
   if (!m.message || !jid || jid === 'status@broadcast' || jid.endsWith('@newsletter')) return;
   const txt = m.message.conversation || m.message.extendedTextMessage?.text || '';
   if (!txt.startsWith(PREFIX)) return;
-  const u = m.key.fromMe ? id : num(m.key.participant || jid);
+  const u = await senderOf(sock, id, m);
   if (!u || banned.has(u)) return;
   const now = Date.now(); if (now - (lastCmd.get(u) || 0) < COOLDOWN) return;
   lastCmd.set(u, now); if (lastCmd.size > 5000) lastCmd.clear();
@@ -368,6 +376,11 @@ http.createServer((req, res) => {
 
 // ---------- Boot ----------
 (async () => {
+  try {
+    const bw = await import('@whiskeysockets/baileys');
+    ({ default: makeWASocket, initAuthCreds, BufferJSON, proto, DisconnectReason, Browsers, makeCacheableSignalKeyStore, fetchLatestBaileysVersion } = bw);
+    console.log('Baileys loaded');
+  } catch (e) { console.error('Baileys load FAILED:', e.message); return; }
   try { if (!DB || !SECRET) throw new Error('FIREBASE_DB_URL / FIREBASE_SECRET are empty in config.js'); await dbSet('health', Date.now()); console.log('Firebase OK'); }
   catch (e) { console.error('Firebase FAILED:', e.message); }
   await loadSettings().catch(() => {}); syncReact();
