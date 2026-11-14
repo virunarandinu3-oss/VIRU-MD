@@ -12,8 +12,8 @@ if (PAIR_CODE.length !== 8) { console.error('PAIR_CODE must be exactly 8 letters
 const BOT_NAME = E.BOT_NAME || 'VIRU MD';
 const fancy = t => t.replace(/[A-Za-z]/g, c => String.fromCodePoint(0x1D5D4 + (c.toUpperCase().charCodeAt(0) - 65))); // A-Z -> bold sans letters
 const BOT_STYLED = fancy(BOT_NAME);
-const L = { creact: N('LIMIT_CREACT', 20), vote: N('LIMIT_VOTE', 3), followers: N('LIMIT_FOLLOWERS', 1), autoreact: N('LIMIT_AUTOREACT_LIFETIME', 1) };
-const MAX_VOTES = N('MAX_VOTES', 3000), MAX_REACTS = N('MAX_REACTS', 4000);
+const L = { creact: N('LIMIT_CREACT', 20), vote: N('LIMIT_VOTE', 1), followers: N('LIMIT_FOLLOWERS', 1), autoreact: N('LIMIT_AUTOREACT_LIFETIME', 1) };
+const MAX_VOTES = N('MAX_VOTES', 1000), MAX_REACTS = N('MAX_REACTS', 4000);
 const EMO_REACT = E.DEFAULT_REACT_EMOJIS || '❤️,🔥,👍', EMO_AUTO = E.DEFAULT_AUTOREACT_EMOJIS || '❤️,🔥,👍,🎉,⚡';
 const CHANNELS = (E.AUTO_FOLLOW_CHANNELS || '').split(',').map(x => x.trim().split('/channel/').pop().split(/[?/]/)[0]).filter(Boolean);
 const PAIR_IP_LIMIT = N('PAIR_IP_LIMIT', 4), PAIR_GLOBAL_LIMIT = N('PAIR_GLOBAL_LIMIT', 60);
@@ -209,14 +209,20 @@ const saveCfg = (u, c) => { cfg.set(u, c); return Object.keys(c).length ? dbSet(
 const allow = async (u, p, max) => staff(u) || canUse(p, max);
 const mark = (u, p) => staff(u) ? 0 : markUse(p);
 const normKey = t => (t || '').toUpperCase().replace(/[^A-Z0-9]/g, ''); // "VIRU DEVS", "viru-devs", "VIRUDEVS" all match
+// Baileys 7.0.0-rc returns the RAW channel data: name/description sit under thread_metadata.*.text
+// (older versions had meta.description directly). Read every shape so it never comes back empty.
+const unwrapMeta = m => (m && m.result && m.result.id ? m.result : m) || {};
+const textOf = v => typeof v === 'string' ? v : (v && typeof v.text === 'string' ? v.text : '');
+const descOf = m => { m = unwrapMeta(m); return textOf(m.thread_metadata?.description) || textOf(m.description) || ''; };
+const nameOf = m => { m = unwrapMeta(m); return textOf(m.thread_metadata?.name) || textOf(m.name) || ''; };
 async function verified(sock, link) {
   let meta, tries = 0;
   for (;;) {
-    try { meta = await sock.newsletterMetadata('invite', codeOf(link)); }
+    try { meta = unwrapMeta(await sock.newsletterMetadata('invite', codeOf(link))); }
     catch (e) { throw new Error('Could not read that channel. Check the link and try again.'); }
     if (!meta || !meta.id) throw new Error('Channel not found. Check the link.');
-    const d = normKey(meta.description);
-    if (KEYS.some(k => d.includes(k))) return meta;
+    const d = normKey(descOf(meta));
+    if (KEYS.some(k => d.includes(k))) return { id: meta.id, name: nameOf(meta) };
     if (++tries >= 3) break; // WhatsApp may be slow to show a fresh edit, so look again
     await sleep(2000);
   }
