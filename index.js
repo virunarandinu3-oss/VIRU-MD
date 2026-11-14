@@ -1,3 +1,4 @@
+if (!globalThis.crypto) globalThis.crypto = require('crypto').webcrypto; // Baileys needs global crypto (Node 18)
 const http = require('http'), fs = require('fs'), path = require('path');
 const { default: makeWASocket, initAuthCreds, BufferJSON, proto, DisconnectReason, Browsers,
   makeCacheableSignalKeyStore, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
