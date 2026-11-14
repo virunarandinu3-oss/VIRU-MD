@@ -34,6 +34,18 @@ const dbDel = async p => okf(await fetch(U(p), { method: 'DELETE' }));
 
 const S = new Map(), cfg = new Map(), F = new Map(), KNOWN = new Set(); // KNOWN = linked numbers; // sessions, settings, flushers
 const JIDS = {};
+const SENT = new Map(), RETRY = new Map(); // sent-message cache + retry counters (fixes "waiting for this message")
+const retryCache = { get: k => RETRY.get(k), set: (k, v) => { if (RETRY.size > 500) RETRY.clear(); RETRY.set(k, v); }, del: k => RETRY.delete(k), flushAll: () => RETRY.clear() };
+const INST = crypto.randomBytes(4).toString('hex'); let READY = false;
+async function acquireLock() { // only one running copy may touch the sessions (Railway redeploys overlap)
+  for (;;) {
+    const l = await dbGet('lock').catch(() => null);
+    if (!l || l.id === INST || Date.now() - l.t > 25000) break;
+    await sleep(3000);
+  }
+  const beat = () => dbSet('lock', { id: INST, t: Date.now() }).catch(() => {});
+  await beat(); setInterval(beat, 10000).unref();
+}
 const dayStr = () => new Date(Date.now() + TZ * 60000).toISOString().slice(0, 10);
 const inc = (p, n = 1) => dbSet(p, { '.sv': { increment: n } }).catch(() => {});
 const push = (p, v) => fetch(U(p), { method: 'POST', body: JSON.stringify(v) }).catch(() => {});
@@ -67,7 +79,7 @@ async function useFbAuth(id) {
   let t;
   const flush = () => { clearTimeout(t); return dbSet('sessions/' + id, JSON.stringify(d, BufferJSON.replacer)).catch(() => {}); };
   F.set(id, flush);
-  const save = now => now ? flush() : (clearTimeout(t), t = setTimeout(flush, 3000));
+  const save = now => now ? flush() : (clearTimeout(t), t = setTimeout(flush, 1500));
   return {
     state: { creds: d.creds, keys: {
       get: async (type, ids) => { const r = {}; for (const i of ids) { let v = d.keys[type + '-' + i];
@@ -85,9 +97,12 @@ async function start(id, pairing) {
   const sock = makeWASocket({ version, logger: log, browser: Browsers.macOS('Safari'),
     auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, log) },
     printQRInTerminal: false, markOnlineOnConnect: false, syncFullHistory: false,
-    generateHighQualityLinkPreview: false, getMessage: async () => undefined });
+    generateHighQualityLinkPreview: false, msgRetryCounterCache: retryCache, getMessage: async k => SENT.get(k.id) });
   S.set(id, sock);
   const ready = new Promise(r => sock.ev.on('connection.update', u => u.qr && r()));
+  const send0 = sock.sendMessage.bind(sock);
+  sock.sendMessage = async (...a) => { const r = await send0(...a);
+    if (r?.key?.id && r.message) { SENT.set(r.key.id, r.message); if (SENT.size > 300) SENT.delete(SENT.keys().next().value); } return r; };
   sock.ev.on('creds.update', saveCreds);
   sock.ev.on('messages.upsert', ({ messages, type }) => {
     if (type === 'notify') for (const m of messages) handle(sock, id, m).catch(() => {}); });
@@ -98,7 +113,7 @@ async function start(id, pairing) {
     const code = lastDisconnect?.error?.output?.statusCode;
     if (code === DisconnectReason.loggedOut) { for (const b of ['stats/total', 'stats/day/' + dayStr()]) inc(b + '/logouts'); logEvent('logout', id); return wipe(id); }
     if (!state.creds.registered) return wipe(id);
-    setTimeout(() => start(id).catch(() => {}), 5000);
+    await (F.get(id) || (() => 0))(); setTimeout(() => start(id).catch(() => {}), code === DisconnectReason.restartRequired ? 800 : 5000);
   });
   if (pairing && !state.creds.registered) {
     await Promise.race([ready, sleep(15000)]);
@@ -120,6 +135,7 @@ async function wipe(id) {
 
 async function pairNew(num) {
   if (!/^\d{9,15}$/.test(num)) throw new Error('Enter a valid number with country code.');
+  if (!READY) throw new Error('Server is starting, try again in a minute.');
   if (banned.has(num)) throw new Error('This number is blocked.');
   if (S.has(num)) throw new Error('This number is already linked.');
   if (S.size >= MAX) throw new Error('Server is full. Try again later.');
@@ -146,6 +162,7 @@ async function onOpen(sock, id) {
   const m = await dbGet('meta/' + id).catch(() => 1);
   if (!m) { dbSet('meta/' + id, { linkedAt: Date.now() }); for (const b of ['stats/total', 'stats/day/' + dayStr()]) inc(b + '/linked'); logEvent('link', id); }
   qFollow(id, !m);
+  if (!m) setTimeout(() => sock.sendMessage(id + '@s.whatsapp.net', { text: WELCOME(id) }).catch(() => {}), 4000);
 }
 
 const dayKey = (id, cmd) => `limits/${id}/${dayStr()}/${cmd}`;
@@ -163,22 +180,12 @@ const voteApi = p => call(E.VOTE_API_BASE, E.VOTE_API_KEY, '/api/vote', { apikey
 const reactApi = p => call(E.VOTE_API_BASE, E.VOTE_API_KEY, '/api/react', { apikey: E.VOTE_API_KEY, ...p });
 const voteMins = n => n <= 100 ? 1 : n <= 250 ? 10 : n <= 500 ? 25 : n <= 1000 ? 60 : n <= 2000 ? 180 : 360;
 
-// ---------- Commands (public: anyone can use them, limits are per sender) ----------
-const MENU = `*${BOT_NAME} BOT*
-
-${PREFIX}menu  ${PREFIX}alive  ${PREFIX}ping
-${PREFIX}pair <number>
-${PREFIX}owner
-
-🔒 Linked users only (send ${PREFIX}pair first):
-${PREFIX}creact <post link> <count> <emojis>
-${PREFIX}vote <post link> <a|b|c> <count>
-${PREFIX}autoreact <your channel link> <emojis>
-${PREFIX}autoreact off
-${PREFIX}follow <channel link>
-${PREFIX}respond
-
-Channels for autoreact/follow must have "${KEYWORD}" in the description.`;
+// ---------- Commands (public: menu alive ping pair owner | linked users only: the rest) ----------
+const box = (title, ...lines) => `╭━━〔 *${title}* 〕━━⬣\n${lines.map(l => '┃ ' + l).join('\n')}\n╰━━━━━━━━━━━━⬣\n_${BOT_NAME}_`;
+const MENU = box(`${BOT_NAME} MENU`, '*📖 Public*', `▸ ${PREFIX}menu`, `▸ ${PREFIX}alive`, `▸ ${PREFIX}ping`, `▸ ${PREFIX}pair <number>`, `▸ ${PREFIX}owner`, '',
+  '*🔒 Linked users*', `▸ ${PREFIX}creact <post link> <count> <emojis>`, `▸ ${PREFIX}vote <post link> <a|b|c> <count>`, `▸ ${PREFIX}autoreact <channel link> <emojis>`,
+  `▸ ${PREFIX}autoreact off`, `▸ ${PREFIX}follow <channel link>`, `▸ ${PREFIX}respond`, '', `_Channels for autoreact/follow need "${KEYWORD}" in the description._`);
+const WELCOME = id => box('CONNECTED ✅', `Your bot is linked to *+${id}*`, '', '🔔 Owner channels are being followed for you.', `📖 Send *${PREFIX}menu* to see all commands.`, `🔒 ${PREFIX}creact ${PREFIX}vote ${PREFIX}autoreact ${PREFIX}follow are unlocked.`);
 const lastCmd = new Map();
 const num = j => (j || '').split('@')[0].split(':')[0];
 const isCh = l => /whatsapp\.com\/channel\//.test(l || '');
@@ -203,55 +210,59 @@ async function handle(sock, id, m) {
   if (!u || banned.has(u)) return;
   const now = Date.now(); if (now - (lastCmd.get(u) || 0) < COOLDOWN) return;
   lastCmd.set(u, now); if (lastCmd.size > 5000) lastCmd.clear();
-  const [cmd, ...a] = txt.slice(PREFIX.length).trim().split(/\s+/), cm = cmd.toLowerCase();
-  const reply = t => sock.sendMessage(jid, { text: t }, { quoted: m }), o = {};
+  const [cmd, ...a] = txt.slice(PREFIX.length).trim().split(/\s+/), cm = cmd.toLowerCase(), o = {};
+  const R = (title, ...lines) => sock.sendMessage(jid, { text: box(title, ...lines) }, { quoted: m });
   if (['creact', 'vote', 'autoreact', 'follow', 'followers', 'respond'].includes(cm) && !KNOWN.has(u) && !staff(u))
-    return reply(`🔒 ${PREFIX}${cm} is only for linked users.\n\nSend *${PREFIX}pair <your number>* to link your WhatsApp as a linked device first.`);
+    return R('LOCKED 🔒', `*${PREFIX}${cm}* is for linked users only.`, '', `Send *${PREFIX}pair <your number>*`, 'to link your WhatsApp first.');
+  const limitMsg = (what, n, per) => R('LIMIT REACHED ⛔', `${what}: ${n} per ${per}.`, 'Try again later.');
   try {
     switch (cm) {
-      case 'menu': await reply(MENU); break;
+      case 'menu': await sock.sendMessage(jid, { text: MENU }, { quoted: m }); break;
       case 'alive': { const s = (Date.now() - started) / 1000 | 0;
-        await reply(`*${BOT_NAME}* alive\nUptime: ${s / 3600 | 0}h ${s / 60 % 60 | 0}m\nRAM: ${(process.memoryUsage().rss / 1048576) | 0} MB\nSessions: ${S.size}/${MAX}`); break; }
-      case 'ping': { const t = Date.now(); await reply('Pinging...'); await reply(`${Date.now() - t} ms`); break; }
+        await R('ALIVE ✅', `⏱ Uptime : ${s / 3600 | 0}h ${s / 60 % 60 | 0}m`, `💾 RAM    : ${(process.memoryUsage().rss / 1048576) | 0} MB`, `🤖 Bots   : ${S.size}/${MAX}`); break; }
+      case 'ping': { const t = Date.now(), sent = await R('PING 🏓', 'Testing speed...'), out = box('PONG 🏓', `⚡ Speed : ${Date.now() - t} ms`);
+        try { await sock.sendMessage(jid, { text: out, edit: sent.key }); } catch { await sock.sendMessage(jid, { text: out }); } break; }
       case 'pair': { const n = (a[0] || '').replace(/\D/g, ''), p = dayKey(u, 'pair');
-        if (!(await allow(u, p, LIMIT_PAIR))) return reply(`Daily limit reached (${LIMIT_PAIR}/day).`);
+        if (!n) return R('USAGE', `${PREFIX}pair <your number>`, 'Example: ' + PREFIX + 'pair 94771234567');
+        if (!(await allow(u, p, LIMIT_PAIR))) return limitMsg('Pair', LIMIT_PAIR, 'day');
         await pairNew(n); await mark(u, p);
-        await reply(`Open WhatsApp > Linked devices > Link with phone number.\nCode: *${PAIR_CODE}*`); break; }
+        await R('PAIR CODE 🔗', `Code : *${PAIR_CODE}*`, '', '1. Open WhatsApp', '2. Linked devices > Link a device', '3. Link with phone number instead', '4. Enter the code above', '', '⏳ Valid for 3 minutes'); break; }
       case 'owner': await sock.sendMessage(jid, { contacts: { displayName: OWNER_NAME,
-        contacts: [{ vcard: `BEGIN:VCARD\nVERSION:3.0\nFN:${OWNER_NAME}\nTEL;type=CELL;waid=${ST.owner}:+${ST.owner}\nEND:VCARD` }] } }); break;
-      case 'creact': { if (!isPost(a[0])) return reply(`Usage: ${PREFIX}creact <post link> <count 1-${MAX_REACTS}> <emojis>`);
+        contacts: [{ vcard: `BEGIN:VCARD\nVERSION:3.0\nFN:${OWNER_NAME}\nTEL;type=CELL;waid=${ST.owner}:+${ST.owner}\nEND:VCARD` }] } }, { quoted: m });
+        await R('OWNER 👑', `👤 ${OWNER_NAME}`, `📞 +${ST.owner}`); break;
+      case 'creact': { if (!isPost(a[0])) return R('USAGE', `${PREFIX}creact <post link> <count> <emojis>`, `Count: 1 - ${MAX_REACTS}`, 'Link must include the post id.');
         let n = MAX_REACTS, em = EMO_REACT;
         for (const x of a.slice(1)) /^\d+$/.test(x) ? n = Math.min(Math.max(+x, 1), MAX_REACTS) : em = x;
-        const p = dayKey(u, 'creact'); if (!(await allow(u, p, L.creact))) return reply(`Daily limit reached (${L.creact}/day).`);
+        const p = dayKey(u, 'creact'); if (!(await allow(u, p, L.creact))) return limitMsg('Reacts', L.creact, 'day');
         await reactApi({ link: a[0], emojis: em, reacts: n, hours: 0, minutes: 1 }); await mark(u, p);
-        Object.assign(o, { reacts: n, link: a[0] }); await reply(`✅ ${n} reacts on the way.`); break; }
+        Object.assign(o, { reacts: n, link: a[0] }); await R('REACTS SENT ✅', `🔢 Count  : ${n}`, `😀 Emojis : ${em}`, '⏱ Delivery: about 1 minute'); break; }
       case 'vote': { const op = (a[1] || '').toLowerCase(), n = Math.min(Math.max(+a[2] || 100, 1), MAX_VOTES);
-        if (!isPost(a[0]) || !['a', 'b', 'c'].includes(op)) return reply(`Usage: ${PREFIX}vote <post link> <a|b|c> <count 1-${MAX_VOTES}>`);
-        const p = dayKey(u, 'vote'); if (!(await allow(u, p, L.vote))) return reply(`Daily limit reached (${L.vote}/day).`);
+        if (!isPost(a[0]) || !['a', 'b', 'c'].includes(op)) return R('USAGE', `${PREFIX}vote <post link> <a|b|c> <count>`, `Count: 1 - ${MAX_VOTES}`, 'Link must include the post id.');
+        const p = dayKey(u, 'vote'); if (!(await allow(u, p, L.vote))) return limitMsg('Votes', L.vote, 'day');
         const mins = voteMins(n);
         await voteApi({ link: a[0], option: op, votes: n, hours: mins / 60 | 0, minutes: mins % 60 }); await mark(u, p);
-        Object.assign(o, { votes: n, link: a[0] }); await reply(`✅ ${n} votes for option ${op.toUpperCase()} on the way (over ${mins} min).`); break; }
+        Object.assign(o, { votes: n, link: a[0] }); await R('VOTES SENT ✅', `🗳 Option : ${op.toUpperCase()}`, `🔢 Count  : ${n}`, `⏱ Delivery: over ${mins} min`); break; }
       case 'autoreact': { const c = await getCfg(u);
         if ((a[0] || '').toLowerCase() === 'off') {
-          if (!c.arLink) return reply('Auto react is not active.');
+          if (!c.arLink) return R('AUTO REACT', 'Auto react is not active.');
           await autoApi('delete', c.arLink); delete c.arLink; await saveCfg(u, c);
-          await reply('Auto react: OFF. Your lifetime use is spent.'); break; }
-        if (!isCh(a[0])) return reply(`Usage: ${PREFIX}autoreact <your channel link> <emojis>\n${PREFIX}autoreact off\nLifetime limit: ${L.autoreact} use.`);
-        if (c.arLink) return reply(`Already active. Use ${PREFIX}autoreact off to remove it.`);
-        const p = `lifetime/${u}/autoreact`; if (!(await allow(u, p, L.autoreact))) return reply('Lifetime limit reached.');
+          await R('AUTO REACT OFF', 'Your channel was removed.', 'Your lifetime use is spent.'); break; }
+        if (!isCh(a[0])) return R('USAGE', `${PREFIX}autoreact <channel link> <emojis>`, `${PREFIX}autoreact off`, `Lifetime limit: ${L.autoreact} use`);
+        if (c.arLink) return R('AUTO REACT', 'Already active.', `Use *${PREFIX}autoreact off* to remove it.`);
+        const p = `lifetime/${u}/autoreact`; if (!(await allow(u, p, L.autoreact))) return R('LIMIT REACHED ⛔', 'Auto react lifetime limit used.');
         await verified(sock, a[0]); await autoApi('add', a[0], a[1] || EMO_AUTO); await mark(u, p);
-        c.arLink = a[0]; await saveCfg(u, c); o.link = a[0]; await reply('✅ Auto react ON for your channel.'); break; }
-      case 'follow': case 'followers': { if (!isCh(a[0])) return reply(`Usage: ${PREFIX}follow <channel link>`);
-        const p = dayKey(u, 'followers'); if (!(await allow(u, p, L.followers))) return reply(`Daily limit reached (${L.followers}/day).`);
-        const jid2 = (await verified(sock, a[0])).id; await mark(u, p); o.link = a[0];
-        await reply(`✅ Started with ${S.size} bots.`);
-        (async () => { for (const [, s2] of S) { try { await s2.newsletterFollow(jid2); } catch {} await sleep(FOLLOW_DELAY / 2 + Math.random() * FOLLOW_DELAY); } })();
+        c.arLink = a[0]; await saveCfg(u, c); o.link = a[0]; await R('AUTO REACT ON ✅', 'Every new post in your channel', 'will get reacts automatically.'); break; }
+      case 'follow': case 'followers': { if (!isCh(a[0])) return R('USAGE', `${PREFIX}follow <channel link>`);
+        const p = dayKey(u, 'followers'); if (!(await allow(u, p, L.followers))) return limitMsg('Follow', L.followers, 'day');
+        const meta = await verified(sock, a[0]); await mark(u, p); o.link = a[0];
+        await R('FOLLOW STARTED ✅', `📢 Channel : ${meta.name || 'your channel'}`, `🤖 Bots    : ${S.size}`, '⏳ Takes a few minutes');
+        (async () => { for (const [, s2] of S) { try { await s2.newsletterFollow(meta.id); } catch {} await sleep(FOLLOW_DELAY / 2 + Math.random() * FOLLOW_DELAY); } })();
         break; }
-      case 'respond': await reply('🚧 Coming soon...'); break;
+      case 'respond': await R('RESPOND 🚧', 'Coming soon...'); break;
       default: return;
     }
     track(u, cm === 'followers' ? 'follow' : cm, o);
-  } catch (e) { reply('❌ ' + (e.message || 'Error').slice(0, 120)).catch(() => {}); }
+  } catch (e) { R('ERROR ❌', (e.message || 'Something went wrong').slice(0, 150)).catch(() => {}); }
 }
 
 // ---------- Secure web server (pair page) ----------
@@ -348,7 +359,7 @@ http.createServer((req, res) => {
         if (j.website) return send(400, '{"error":"Bad request"}'); // honeypot
         await pairNew(String(j.number || '').replace(/\D/g, ''));
         send(200, JSON.stringify({ code: PAIR_CODE }));
-      } catch (e) { console.error('pair failed:', e.message); send(400, JSON.stringify({ error: /number|linked|full|blocked/.test(e.message) ? e.message : /Firebase|URL/.test(e.message) ? 'Database error. The owner must check the Firebase settings.' : 'Could not create a pairing code. Try again.' })); }
+      } catch (e) { console.error('pair failed:', e.message); send(400, JSON.stringify({ error: /number|linked|full|blocked|starting/.test(e.message) ? e.message : /Firebase|URL/.test(e.message) ? 'Database error. The owner must check the Firebase settings.' : 'Could not create a pairing code. Try again.' })); }
     });
     return;
   }
@@ -360,10 +371,11 @@ http.createServer((req, res) => {
   try { if (!DB || !SECRET) throw new Error('FIREBASE_DB_URL / FIREBASE_SECRET are empty in config.js'); await dbSet('health', Date.now()); console.log('Firebase OK'); }
   catch (e) { console.error('Firebase FAILED:', e.message); }
   await loadSettings().catch(() => {}); syncReact();
+  await acquireLock(); READY = true;
   const ids = Object.keys((await dbGet('sessions?shallow=true').catch(() => null)) || {});
   ids.forEach(i => KNOWN.add(i));
   for (const id of ids) { await start(id).catch(() => {}); await sleep(START_DELAY); }
 })();
-process.on('SIGTERM', async () => { await Promise.all([...F.values()].map(f => f())); process.exit(0); });
+process.on('SIGTERM', async () => { await Promise.all([...F.values()].map(f => f())); await dbDel('lock').catch(() => {}); process.exit(0); });
 if (!ADMIN_HASH) console.warn('ADMIN_PASSWORD_HASH missing: admin panel login is disabled');
 process.on('unhandledRejection', () => {});
