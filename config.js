@@ -7,7 +7,7 @@ module.exports = {
   // ----- Identity -----
   BOT_NAME: 'VIRU MD',
   OWNER_NAME: 'VIRU Dev',               // name shown on the .owner contact card
-  OWNER_NUMBER: '94XXXXXXXXX',          // FILL: your number, country code, digits only
+  OWNER_NUMBER: '94718120118',          // FILL: your number, country code, digits only
   PAIR_CODE: 'VIRUDEVS',                // exactly 8 letters/numbers
   PREFIX: '.',
   MAX_SESSIONS: 100,
