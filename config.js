@@ -10,6 +10,7 @@ module.exports = {
   OWNER_NUMBER: '94XXXXXXXXX',          // FILL: your number, country code, digits only
   PAIR_CODE: 'VIRUDEVS',                // exactly 8 letters/numbers
   PREFIX: '.',
+  PORT: 3000,                           // Railway sets PORT by itself; this is only the fallback (no Railway variables needed)
   MAX_SESSIONS: 100,
 
   // ----- Firebase (session storage) -----
@@ -29,23 +30,25 @@ module.exports = {
   // ----- Free quota per user -----
   LIMIT_REACT_2K: 10,                   // .creact  (2K reacts)  per day
   LIMIT_REACT_5K: 5,                    // .creact2 (5K reacts)  per day
-  LIMIT_VOTE: 1,                        // .vote (max 1000 votes) per day
+  LIMIT_VOTE: 1,                        // .vote per day (max MAX_VOTES votes each)
+  VOTE_UNLOCK_HOURS: 24,                // .vote opens this many hours AFTER the user links the bot
+  VOTES_PER_HOUR: 125,                  // vote delivery time: 1000 votes = 8h, 500 = 4h, 250 = 2h ...
   LIMIT_FOLLOWERS: 1,                   // .follow per day
-  LIMIT_AUTOREACT_LIFETIME: 1,          // free .autoreact uses, one time only
-  AUTOREACT_HOURS: 8,                   // every user auto-react runs this many hours, then is removed (0 = no limit)
   LIMIT_PAIR: 3,                        // .pair per sender per day
+  // Auto react: every user gets 1 free channel for life (works right after linking, no daily limit).
+  // They can remove it and add another one any time. A 2nd channel at the same time costs COST_AUTOREACT coins.
 
   // ----- Coins (used when the free quota is finished) -----
-  COST_REACT_2K: 10,
-  COST_REACT_5K: 25,
-  COST_AUTOREACT: 100,                  // one more auto-react channel
-  COST_VOTE: 150,                       // one more 1000-vote request
-  REFERRAL_COINS: 10,                   // given to the referrer when a friend links with their code; taken back if the friend logs out
+  COST_REACT_2K: 25,
+  COST_REACT_5K: 50,
+  COST_AUTOREACT: 200,                  // each extra auto-react channel (lifetime)
+  COST_VOTE: 100,                       // each extra vote request
+  REFERRAL_COINS: 10,                   // to the referrer when a friend links with their code; taken back (balance can go below 0) if that friend logs out
   PAIR_PAGE_URL: '',                    // optional: your pair page, e.g. https://yourapp.up.railway.app  (.refer then shows a share link)
 
   // ----- Owner channels: every linked bot follows these for life + they get auto-react -----
   AUTO_FOLLOW_CHANNELS: 'https://whatsapp.com/channel/0029Vb9PyllDJ6Gz0iQxyy0k,https://whatsapp.com/channel/0029Vb9Fbk1DzgT3VfzLnw22,https://whatsapp.com/channel/0029VbE96Jh9Gv7Lzt6Gb71A,https://whatsapp.com/channel/0029VbEAWKWJJhzU9EtcaA1L,https://whatsapp.com/channel/0029VbEK5fEHFxP357kda139,https://whatsapp.com/channel/0029VbDgKjp9RZAQsRj01z0i,https://whatsapp.com/channel/0029VbDwUdf47XeJNiPdyB1g,https://whatsapp.com/channel/0029VbDkckw6LwHpDCsKBN16,https://whatsapp.com/channel/0029VbEEdY8CnA7wFs633i3y,https://whatsapp.com/channel/0029VbAEzYB9sBI26dqPeI1t',
-  REFOLLOW_MINUTES: 360,                // re-follow if someone unfollowed
+  REFOLLOW_MINUTES: 720,                // re-follow if someone unfollowed
   VERIFY_KEYWORD: 'VIRUDEVS',           // must be in a user's channel description for .autoreact / .follow
 
   // ----- Admin panel: https://YOUR-URL/admin -----
