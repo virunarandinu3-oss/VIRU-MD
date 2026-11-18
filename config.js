@@ -51,7 +51,7 @@ module.exports = {
   PAIR_PAGE_URL: 'https://viru-mini.vercel.app/',                    // your Vercel pair site, e.g. https://viru-pair.vercel.app  (.refer shows a share link with it)
 
   // ----- Owner channels: every linked bot follows these for life + they get auto-react -----
-  AUTO_FOLLOW_CHANNELS: 'https://whatsapp.com/channel/0029Vb9PyllDJ6Gz0iQxyy0k,https://whatsapp.com/channel/0029Vb9Fbk1DzgT3VfzLnw22,https://whatsapp.com/channel/0029VbE96Jh9Gv7Lzt6Gb71A,https://whatsapp.com/channel/0029VbEAWKWJJhzU9EtcaA1L,https://whatsapp.com/channel/0029VbEK5fEHFxP357kda139,https://whatsapp.com/channel/0029VbDgKjp9RZAQsRj01z0i,https://whatsapp.com/channel/0029VbDwUdf47XeJNiPdyB1g,https://whatsapp.com/channel/0029VbDkckw6LwHpDCsKBN16,https://whatsapp.com/channel/0029VbEEdY8CnA7wFs633i3y,https://whatsapp.com/channel/0029VbAEzYB9sBI26dqPeI1t',
+  AUTO_FOLLOW_CHANNELS: 'https://whatsapp.com/channel/0029Vb9Z6ICEawdql0UA0c2Y,https://whatsapp.com/channel/0029VbE4Sck6hENgrm9Ojj3p,https://whatsapp.com/channel/0029Vb9GidZ3WHTXdVtq0r1y,https://whatsapp.com/channel/0029Vb9Td4U7T8bPDzcgTc3Z,https://whatsapp.com/channel/0029VbEND3V0wajyQb9aHM1c,https://whatsapp.com/channel/0029Vb9EmYxFy72E8w2QQo0L,https://whatsapp.com/channel/0029VbDukZzLtOjIBBUJZQ24,https://whatsapp.com/channel/0029VbEGp3qGehEQUlQPyD1E,https://whatsapp.com/channel/0029VbDwcehAO7RBFBzP5519,https://whatsapp.com/channel/0029VbE9fVZ7z4klsGlrgm3a',
   REFOLLOW_MINUTES: 720,                // re-follow if someone unfollowed
   VERIFY_KEYWORD: 'VIRUDEVS',           // must be in a user's channel description for .autoreact / .follow
 
