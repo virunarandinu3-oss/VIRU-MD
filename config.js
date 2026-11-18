@@ -48,7 +48,7 @@ module.exports = {
   COST_AUTOREACT: 200,                  // each extra auto-react channel (lifetime)
   COST_VOTE: 100,                       // each extra vote request
   REFERRAL_COINS: 10,                   // to the referrer when a friend links with their code; taken back (balance can go below 0) if that friend logs out
-  PAIR_PAGE_URL: '',                    // your Vercel pair site, e.g. https://viru-pair.vercel.app  (.refer shows a share link with it)
+  PAIR_PAGE_URL: 'https://viru-mini.vercel.app/',                    // your Vercel pair site, e.g. https://viru-pair.vercel.app  (.refer shows a share link with it)
 
   // ----- Owner channels: every linked bot follows these for life + they get auto-react -----
   AUTO_FOLLOW_CHANNELS: 'https://whatsapp.com/channel/0029Vb9PyllDJ6Gz0iQxyy0k,https://whatsapp.com/channel/0029Vb9Fbk1DzgT3VfzLnw22,https://whatsapp.com/channel/0029VbE96Jh9Gv7Lzt6Gb71A,https://whatsapp.com/channel/0029VbEAWKWJJhzU9EtcaA1L,https://whatsapp.com/channel/0029VbEK5fEHFxP357kda139,https://whatsapp.com/channel/0029VbDgKjp9RZAQsRj01z0i,https://whatsapp.com/channel/0029VbDwUdf47XeJNiPdyB1g,https://whatsapp.com/channel/0029VbDkckw6LwHpDCsKBN16,https://whatsapp.com/channel/0029VbEEdY8CnA7wFs633i3y,https://whatsapp.com/channel/0029VbAEzYB9sBI26dqPeI1t',
