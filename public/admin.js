@@ -24,7 +24,7 @@ async function detail(id) {
   };
   sel.onchange = draw;
   v.append(btn('Back', () => go('Users')), el('h2', {}, id),
-    el('p', {}, `Linked: ${ago(d.meta.linkedAt)} | Bot ${d.online ? 'online' : 'offline'} | Auto-react: ${d.cfg.arLink || 'none'} | Auto-react used: ${d.life.autoreact || 0}`),
+    el('p', {}, `Linked: ${ago(d.meta.linkedAt)} | Bot ${d.online ? 'online' : 'offline'} | Coins: ${d.coins || 0} | Auto-react: ${(d.ar || []).length ? d.ar.map(x => x.link.split('/').pop()).join(', ') : 'none'}`),
     btn(d.banned ? 'Unban' : 'Ban', async () => { await api('act', { op: 'ban', value: id, on: !d.banned }); detail(id); }, 'bad'),
     d.online ? btn('Remove bot session', async () => { if (confirm('Logout ' + id + '?')) { await api('act', { op: 'remove', value: id }); go('Users'); } }, 'bad') : null, sel, out);
   draw();
