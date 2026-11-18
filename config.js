@@ -17,7 +17,7 @@ module.exports = {
   FIREBASE_DB_URL: 'https://viru-md-default-rtdb.firebaseio.com',                  // FILL: https://YOUR-PROJECT-default-rtdb.firebaseio.com
   FIREBASE_SECRET: '36cyKul2chcI7prFoR8CSYOKBrTRaRSXVhAd1pye',                  // FILL: Firebase database secret
 
-  // ----- Owner API (all endpoints live on this one server: /api/owner/...) -----
+   // ----- Owner API (all endpoints live on this one server: /api/owner/...) -----
   // vote, react-2000, react-5000, auto-react-2000, auto-react-5000
   OWNER_API_BASE: 'https://vote-api-production-4581.up.railway.app',
   OWNER_API_KEY: 'VIRUDEVS-OWNER-ULTRA-MAX',
