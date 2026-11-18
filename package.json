@@ -2,7 +2,7 @@
   "name": "viru-devs-bot",
   "version": "1.0.0",
   "main": "index.js",
-  "scripts": { "start": "node --max-old-space-size=400 index.js" },
+  "scripts": { "start": "node --max-old-space-size=400 --max-semi-space-size=2 index.js" },
   "engines": { "node": ">=20" },
   "dependencies": { "@whiskeysockets/baileys": "7.0.0-rc14", "pino": "^9.0.0" }
 }
