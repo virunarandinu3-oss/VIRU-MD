@@ -56,9 +56,10 @@ module.exports = {
   VERIFY_KEYWORD: 'VIRUDEVS',           // must be in a user's channel description for .autoreact / .follow
 
   // ----- Admin panel: the Railway URL itself (open it, type the password) -----
-  ADMIN_PASSWORD_HASH: '9671a3a91b8fb36e4a70115fcd48820c:d71ff585ba05fc23c0e56e6a6504250b1c6c2b8432ab310bd67fb7070fee135d', // hash of your password (new one: node hash.js "password")
+  ADMIN_PASSWORD_HASH: 'cfbeffa5bcab2baa7bedc7e05ba4e3c7:11313d68adbab81d1da300a5151bba7cb4cd713f961a7073e45e32a897675685', // hash of the admin password (change it: node hash.js "new password")
   PAIR_SECRET: '68a68f7bd0028394a3423279c7810d251e2a1994ffeb4e07b500a41fdf42dcd2', // SAME value goes in Vercel as PAIR_SECRET. Only the Vercel pair site can request pairing codes.
   TZ_OFFSET_MIN: 330,                   // Sri Lanka time for "today"
+  ADMIN_ACTION_DELAY_MS: 700,           // admin panel: pause between bots when all active bots follow / react (anti-ban pacing)
 
   // ----- Safety / pacing -----
   COOLDOWN_MS: 1500,                    // anti-spam per sender

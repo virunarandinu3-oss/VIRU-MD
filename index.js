@@ -34,6 +34,7 @@ const COOLDOWN = N('COOLDOWN_MS', 1500), REFOLLOW_MIN = N('REFOLLOW_MINUTES', 72
 const SECRET_KEY = crypto.createHash('sha256').update(SECRET + ':' + ADMIN_HASH).digest('hex');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const started = Date.now();
+setInterval(() => { const m = process.memoryUsage(); RAMS.push({ t: Date.now(), rss: m.rss, heap: m.heapUsed, on: OPEN.size }); if (RAMS.length > 360) RAMS.shift(); }, 30000).unref(); // last 3 hours, every 30s
 
 // ---------- Firebase (REST, no SDK) ----------
 const U = p => { const [a, q] = p.split('?'); return `${DB}/${a}.json?auth=${SECRET}${q ? '&' + q : ''}`; };
@@ -42,6 +43,7 @@ const dbGet = async p => (await okf(await fetch(U(p)))).json();
 const dbSet = async (p, v) => okf(await fetch(U(p), { method: 'PUT', body: JSON.stringify(v) }));
 const dbDel = async p => okf(await fetch(U(p), { method: 'DELETE' }));
 
+const OPEN = new Set(), RAMS = [], JOBS = []; let jobSeq = 0; // OPEN = bots really connected right now, RAMS = RAM/online samples for the admin charts, JOBS = admin actions (follow / react from active bots)
 const S = new Map(), cfg = new Map(), F = new Map(), KNOWN = new Set(); // KNOWN = linked numbers; // sessions, settings, flushers
 const JIDS = {};
 const SENT = new Map(), RETRY = new Map(); // sent-message cache + retry counters (fixes "waiting for this message")
@@ -75,10 +77,28 @@ async function loadSettings() {
 async function syncReact() { // owner channels -> auto-react API
   for (const [c, ok] of Object.entries(ST.react)) if (!ok) try { await autoApi('add', `https://whatsapp.com/channel/${c}`, EMO_AUTO); await dbSet(`settings/react/${c}`, 1); ST.react[c] = 1; } catch {}
 }
+async function backfill() { // one time: build the new admin counters from the old per-user usage logs, so charts are not empty
+  if (await dbGet('settings/bf1').catch(() => 1)) return;
+  const tot = { reacts: 0, votes: 0 }, cmds = {}, days = {}, chs = {};
+  for (const u of Object.keys((await dbGet('usage?shallow=true')) || {})) {
+    const us = (await dbGet('usage/' + u)) || {}; let re = 0, vo = 0;
+    for (const [d, x] of Object.entries(us)) { re += x.reacts || 0; vo += x.votes || 0;
+      for (const [k, n] of Object.entries(x.cmds || {})) { cmds[k] = (cmds[k] || 0) + n; ((days[d] ||= {}).c ||= {})[k] = (days[d].c[k] || 0) + n; }
+      for (const e of Object.values(x.ev || {})) { const c = (e.l || '').split('/channel/')[1]?.split('/')[0]; if (!c) continue; const h = chs[c] ||= { reacts: 0, votes: 0, n: 0, last: 0 };
+        if (e.c === 'vote') h.votes += e.n || 0; else h.reacts += e.n || 0; h.n++; h.last = Math.max(h.last, e.t || 0); } }
+    if (re) await dbSet(`users/${u}/reacts`, re); if (vo) await dbSet(`users/${u}/votes`, vo);
+  }
+  if (Object.keys(cmds).length) await dbSet('stats/total/c', cmds);
+  for (const [d, v] of Object.entries(days)) await dbSet(`stats/day/${d}/c`, v.c);
+  for (const [c, v] of Object.entries(chs)) await dbSet('chstats/' + c, v);
+  await dbSet('settings/bf1', Date.now());
+}
 function track(u, cmd, o = {}) {
   if (!u) return; const d = dayStr();
-  for (const b of ['stats/total', 'stats/day/' + d]) { inc(b + '/cmds'); if (o.reacts) inc(b + '/reacts', o.reacts); if (o.votes) inc(b + '/votes', o.votes); if (cmd === 'follow') inc(b + '/follows'); }
+  for (const b of ['stats/total', 'stats/day/' + d]) { inc(b + '/cmds'); inc(b + '/c/' + cmd); if (o.reacts) inc(b + '/reacts', o.reacts); if (o.votes) inc(b + '/votes', o.votes); if (cmd === 'follow') inc(b + '/follows'); }
   inc(`users/${u}/cmds`); dbSet(`users/${u}/last`, Date.now()).catch(() => {}); inc(`usage/${u}/${d}/cmds/${cmd}`);
+  if (o.reacts) inc(`users/${u}/reacts`, o.reacts); if (o.votes) inc(`users/${u}/votes`, o.votes);
+  if (o.link && (o.reacts || o.votes)) { const c = o.link.split('/channel/')[1]?.split('/')[0]; if (c) { inc(`chstats/${c}/reacts`, o.reacts || 0); inc(`chstats/${c}/votes`, o.votes || 0); inc(`chstats/${c}/n`); dbSet(`chstats/${c}/last`, Date.now()).catch(() => {}); } }
   if (o.reacts) inc(`usage/${u}/${d}/reacts`, o.reacts);
   if (o.votes) inc(`usage/${u}/${d}/votes`, o.votes);
   if (o.link) push(`usage/${u}/${d}/ev`, { t: Date.now(), c: cmd, l: o.link, n: o.reacts || o.votes || 0 });
@@ -119,7 +139,8 @@ async function start(id, pairing) {
   sock.ev.on('messages.upsert', ({ messages, type }) => {
     if (type === 'notify') for (const m of messages) handle(sock, id, m).catch(() => {}); });
   sock.ev.on('connection.update', async ({ connection, lastDisconnect }) => {
-    if (connection === 'open') onOpen(sock, id);
+    if (connection === 'open') { OPEN.add(id); onOpen(sock, id); }
+    if (connection === 'close') OPEN.delete(id);
     if (connection !== 'close' || sock.dead) return;
     S.delete(id);
     const code = lastDisconnect?.error?.output?.statusCode;
@@ -143,7 +164,7 @@ async function wipe(id) {
   for (const [k, j] of [...AR]) if (j.u === id) { await autoDel(j.link, j.api).catch(() => {}); await dropAR(k); }
   const c = (await dbGet('cfg/' + id).catch(() => null)) || {};
   if (c.arLink) await autoDel(c.arLink).catch(() => {});
-  cfg.delete(id); F.delete(id); KNOWN.delete(id);
+  cfg.delete(id); F.delete(id); KNOWN.delete(id); OPEN.delete(id);
   return Promise.all(['sessions/', 'meta/', 'cfg/'].map(p => dbDel(p + id)));
 }
 
@@ -166,7 +187,7 @@ async function runFQ() {
   while (FQ.length) {
     const sock = S.get(FQ.shift()); if (!sock) continue;
     for (const c of ST.follow) {
-      try { const jid = JIDS[c] || (JIDS[c] = (await sock.newsletterMetadata('invite', c)).id); await sock.newsletterFollow(jid); } catch {}
+      try { const jid = JIDS[c] || (JIDS[c] = unwrapMeta(await sock.newsletterMetadata('invite', c)).id); await sock.newsletterFollow(jid); } catch {}
       await sleep(FOLLOW_DELAY + Math.random() * FOLLOW_DELAY);
     }
   }
@@ -297,7 +318,7 @@ const menuFor = (u, linked) => {
     '🗳️ *Poll Votes*  ➜ ✅ Available', `     ${L.vote} free / day • up to ${MAX_VOTES} votes`, `     (opens ${VOTE_UNLOCK}h after linking)`,
     '🚀 *Channel Reacts*  ➜ ✅ Available', `     2K reacts ×${L.r2k} + 5K reacts ×${L.r5k} / day`,
     '🤖 *Auto React*  ➜ ✅ Available', '     1 channel free for life',
-    '👥 *Add Followers*  ➜ ' + (locked ? '🔒 Coming soon' : '✅ Available'), locked ? `     Opens when the bot reaches ${FOLLOW_UNLOCK} users` : `     ${L.followers} free / day`,
+    '👥 *Add Followers*  ➜ ' + (locked ? '🔒 Coming soon' : '✅ Available'), ...(locked ? [] : [`     ${L.followers} free / day`]),
     '💰 *Referral Coins*  ➜ ✅ Available', `     +${REF_COINS} coins for every friend you invite`, '',
     '⚡ *START IN 3 STEPS*', `1️⃣ Send *${PREFIX}pair 947XXXXXXXX*`, '2️⃣ Link with the 8 letter code', `3️⃣ Send *${PREFIX}menu* again`, '',
     `🔐 Send *${PREFIX}pair <your number>* now to unlock everything!`);
@@ -305,9 +326,9 @@ const menuFor = (u, linked) => {
     '🚀 *REACTS*', `🔹 ${PREFIX}creact <post link> <emojis>`, `🔹 ${PREFIX}creact2 <post link> <emojis>`, '',
     '🗳️ *POLL VOTES*', `🔹 ${PREFIX}vote <post link> <a|b|c> [count]`, '',
     '🤖 *AUTO REACT*', `🔹 ${PREFIX}autoreact <channel link> <emojis>`, `🔹 ${PREFIX}autoreact off [channel link]`, '',
-    '👥 *CHANNEL*', `🔹 ${PREFIX}follow <channel link>${locked ? ' 🔒' : ''}`, ...(locked ? [`🔒 Opens when the bot reaches ${FOLLOW_UNLOCK} users`] : []), '',
+    '👥 *CHANNEL*', `🔹 ${PREFIX}follow <channel link>${locked ? ' 🔒' : ''}`, '',
     '💰 *COINS*', `🔹 ${PREFIX}coins`, `🔹 ${PREFIX}refer`,
-    ...(staff(u) ? ['', '👑 *STAFF*', `🔹 ${PREFIX}addcoins <number> <amount>`, ...(u === ST.owner ? [`📊 Linked bots : ${KNOWN.size} / ${FOLLOW_UNLOCK} (follow unlock)`] : [])] : []));
+    ...(staff(u) ? ['', '👑 *STAFF*', `🔹 ${PREFIX}addcoins <number> <amount>`, ...(u === ST.owner ? [`📊 Linked bots : ${KNOWN.size} / ${MAX}`] : [])] : []));
 };
 const WELCOME = (id, code) => box('🎉 𝗖𝗢𝗡𝗡𝗘𝗖𝗧𝗘𝗗 𝗦𝗨𝗖𝗖𝗘𝗦𝗦𝗙𝗨𝗟𝗟𝗬 🎉',
   '✅ Your WhatsApp is linked to the bot!', `📱 Number : *+${id}*`, '🟢 Status : Online 24/7', '',
@@ -355,7 +376,7 @@ async function verified(sock, link) {
     if (++tries >= 3) break; // WhatsApp may be slow to show a fresh edit, so look again
     await sleep(2000);
   }
-  throw new Error(`Add "${KEYWORD.split(',')[0]}" to your channel description, save it, wait 1-2 minutes and try again.`);
+  const ke = new Error('Copy the word below, add it to your channel description, save it, wait 1-2 minutes and try again.'); ke.keyword = KEYWORD.split(',')[0]; throw ke;
 }
 
 async function senderOf(sock, id, m) { // WhatsApp now uses LIDs; find the real phone number
@@ -394,7 +415,8 @@ async function handle(sock, id, m) {
         if (!n) return R('🔗 USAGE 🔗', `📌 ${PREFIX}pair <your number> [referral code]`, `💡 Example: ${PREFIX}pair 94771234567 VDABC123`);
         if (!(await allow(u, p, LIMIT_PAIR))) return limitMsg('Pair', LIMIT_PAIR, 'day');
         await pairNew(n, a[1]); await mark(u, p);
-        await R('🔗 PAIR CODE 🔗', '🎉 Your pairing code is ready!', '', `🔑 Code : *${PAIR_CODE}*`, '', '📱 *How to link*', '1️⃣ Open WhatsApp', '2️⃣ Settings ➜ Linked devices', '3️⃣ Link a device', '4️⃣ Link with phone number instead', '5️⃣ Enter the code above', '', '⏳ Valid for 3 minutes', ...(a[1] ? ['🎁 Referral code applied ✅'] : []), `📖 After linking, send *${PREFIX}menu*`); break; }
+        await R('🔗 PAIR CODE 🔗', '🎉 Your pairing code is ready!', '', `🔑 Code : *${PAIR_CODE}*`, '', '📱 *How to link*', '1️⃣ Open WhatsApp', '2️⃣ Settings ➜ Linked devices', '3️⃣ Link a device', '4️⃣ Link with phone number instead', '5️⃣ Enter the code above', '', '⏳ Valid for 3 minutes', ...(a[1] ? ['🎁 Referral code applied ✅'] : []), `📖 After linking, send *${PREFIX}menu*`);
+        await sock.sendMessage(jid, { text: PAIR_CODE }); break; } // code alone in its own message: long-press to copy
       case 'owner': // contact card -> its "Message" button opens a chat with the number THIS bot is linked to
         await sock.sendMessage(jid, { contacts: { displayName: OWNER_NAME,
           contacts: [{ displayName: OWNER_NAME, vcard: `BEGIN:VCARD\nVERSION:3.0\nN:;${OWNER_NAME};;;\nFN:${OWNER_NAME}\nTEL;type=CELL;type=VOICE;waid=${id}:+${id}\nEND:VCARD` }] } }, Q);
@@ -450,7 +472,7 @@ async function handle(sock, id, m) {
         if (!t || !Number.isFinite(n)) return R('🪙 USAGE 🪙', `📌 ${PREFIX}addcoins <number> <amount>`);
         await addCoins(t, n); await R('🪙 COINS UPDATED ✅', `👤 +${t}`, `➕ ${n}`, `💰 Balance : ${await getCoins(t)}`); break; }
       case 'follow': case 'followers': {
-        if (followLocked(u)) return R('🔒 FOLLOW LOCKED 🔒', '👥 Followers are not open yet.', `🚀 They open once the bot reaches *${FOLLOW_UNLOCK}* users.`, '', '🎁 Until then use reacts, poll votes & auto react.', `📖 Send *${PREFIX}menu*`);
+        if (followLocked(u)) return R('🔒 FOLLOW LOCKED 🔒', '👥 Followers are not open yet.', '🚀 They will open soon.', '', '🎁 Until then use reacts, poll votes & auto react.', `📖 Send *${PREFIX}menu*`);
         if (!isCh(a[0])) return R('👥 USAGE 👥', `📌 ${PREFIX}follow <channel link>`);
         const p = dayKey(u, 'followers'); if (!(await allow(u, p, L.followers))) return limitMsg('Follow', L.followers, 'day');
         const meta = await verified(sock, chLink(a[0])); await mark(u, p); o.link = chLink(a[0]);
@@ -460,13 +482,13 @@ async function handle(sock, id, m) {
       default: return;
     }
     track(u, cm === 'followers' ? 'follow' : cm, o);
-  } catch (e) { R('❌ ERROR ❌', '⚠️ ' + (e.message || 'Something went wrong').slice(0, 150)).catch(() => {}); }
+  } catch (e) { R('❌ ERROR ❌', '⚠️ ' + (e.message || 'Something went wrong').slice(0, 150)).then(() => e.keyword && sock.sendMessage(jid, { text: e.keyword })).catch(() => {}); } // keyword goes in its own message so it is easy to copy
 }
 
 // ---------- Secure web server (pair page) ----------
 const SEC = { 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'Referrer-Policy': 'no-referrer',
   'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex', 'Cross-Origin-Opener-Policy': 'same-origin', 'Cross-Origin-Resource-Policy': 'same-origin', 'Permissions-Policy': 'camera=(), microphone=(), geolocation=()', 'Strict-Transport-Security': 'max-age=31536000',
-  'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" };
+  'Content-Security-Policy': "default-src 'none'; script-src 'self'; img-src data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" };
 const hits = new Map();
 setInterval(() => hits.clear(), 3600e3).unref();
 const tooMany = (k, max) => { const n = (hits.get(k) || 0) + 1; hits.set(k, n); return n > max; };
@@ -475,10 +497,49 @@ const FC = new Map(); const file = f => FC.get(f) || (FC.set(f, fs.readFileSync(
 const sign = x => crypto.createHmac('sha256', SECRET_KEY).update(x).digest('hex');
 const eq = (a, b) => crypto.timingSafeEqual(crypto.createHash('sha256').update(String(a)).digest(), crypto.createHash('sha256').update(String(b)).digest());
 const adminOk = pw => { try { const [salt, h] = ADMIN_HASH.split(':'); return crypto.timingSafeEqual(crypto.scryptSync(String(pw), salt, 32), Buffer.from(h, 'hex')); } catch { return false; } };
-const authed = req => { const m = /__Host-vd_admin=(\d+)\.([a-f0-9]{64})/.exec(req.headers.cookie || ''); return !!m && +m[1] > Date.now() && eq(sign(m[1]), m[2]); };
+// Login cookie: on https (Railway, any host) it is the strict __Host- cookie; on plain http (local testing) a normal HttpOnly cookie, so the panel opens in both cases.
+const isHttps = req => !!req.socket.encrypted || String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https';
+const authed = req => { const m = new RegExp('(?:^|;\\s*)' + (isHttps(req) ? '__Host-vd_admin' : 'vd_admin') + '=(\\d+)\\.([a-f0-9]{64})').exec(req.headers.cookie || ''); return !!m && +m[1] > Date.now() && eq(sign(m[1]), m[2]); };
+const cookie = (req, v, age) => isHttps(req) ? `__Host-vd_admin=${v}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${age}` : `vd_admin=${v}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${age}`;
 const locks = new Map(); let gfail = 0; setInterval(() => { gfail = 0; }, 3600e3).unref(); // global failed-login counter: every wrong guess makes the next ones slower
-const readBody = req => new Promise(r => { let b = ''; req.on('data', d => { b += d; if (b.length > 2048) req.destroy(); }); req.on('end', () => { try { r(JSON.parse(b || '{}')); } catch { r({}); } }); });
-const cookie = (v, age) => `__Host-vd_admin=${v}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${age}`;
+const readBody = req => new Promise(r => { let b = ''; req.on('data', d => { b += d; if (b.length > 4096) req.destroy(); }); req.on('end', () => { try { r(JSON.parse(b || '{}')); } catch { r({}); } }); });
+
+// ---------- Admin actions that use the ACTIVE bots (follow a channel / react to a post) ----------
+const ADM_DELAY = N('ADMIN_ACTION_DELAY_MS', 700);
+const shuffle = a => { for (let i = a.length - 1; i > 0; i--) { const j = Math.random() * (i + 1) | 0; [a[i], a[j]] = [a[j], a[i]]; } return a; };
+const openBots = () => [...OPEN].filter(id => S.has(id)).map(id => [id, S.get(id)]);
+const newJob = (type, target, total, note = '') => { const j = { id: ++jobSeq, type, target, total, done: 0, ok: 0, fail: 0, status: 'running', t: Date.now(), note }; JOBS.unshift(j); if (JOBS.length > 40) JOBS.pop(); return j; };
+async function chJid(code) { // channel invite code -> channel id, asked through any connected bot
+  if (JIDS[code]) return JIDS[code];
+  for (const [, s] of openBots()) { try { const m = unwrapMeta(await s.newsletterMetadata('invite', code)); if (m.id) return (JIDS[code] = m.id); } catch {} }
+  throw new Error('Could not read that channel (no connected bot, or wrong link).');
+}
+function jobFollow(code) {
+  const bots = shuffle(openBots()), job = newJob('follow', code, bots.length);
+  (async () => { try { const jid = await chJid(code);
+    for (const [, s] of bots) { try { await s.newsletterFollow(jid); job.ok++; } catch { job.fail++; } job.done++; await sleep(ADM_DELAY + Math.random() * ADM_DELAY); }
+    job.status = 'done'; } catch (e) { job.status = 'failed'; job.note = e.message; } })();
+  return job;
+}
+function jobReact(code, post, emojis, limit, follow) { // every chosen connected bot reacts to the post itself (random emoji from the list)
+  let bots = shuffle(openBots()); if (limit > 0) bots = bots.slice(0, limit);
+  const job = newJob('react', code + '/' + post, bots.length, emojis.join(' '));
+  (async () => { try { const jid = await chJid(code);
+    for (const [, s] of bots) { try { if (follow) await s.newsletterFollow(jid).catch(() => {}); await s.newsletterReactMessage(jid, post, emojis[Math.random() * emojis.length | 0]); job.ok++; } catch { job.fail++; } job.done++; await sleep(ADM_DELAY + Math.random() * ADM_DELAY); }
+    job.status = 'done'; } catch (e) { job.status = 'failed'; job.note = e.message; } })();
+  return job;
+}
+const CHM = new Map(); let chBusy = false; // channel name + follower count cache for the panel (filled in the background)
+const subsOf = m => +(m.thread_metadata?.subscribers_count ?? m.subscribers ?? 0) || 0;
+async function chFill(codes) {
+  if (chBusy) return; chBusy = true;
+  try { const bot = openBots()[0]?.[1]; if (!bot) return;
+    for (const c of codes) { const h = CHM.get(c); if (h && Date.now() - h.t < 600000) continue;
+      try { const m = unwrapMeta(await bot.newsletterMetadata('invite', c)); CHM.set(c, { name: nameOf(m), subs: subsOf(m), t: Date.now() }); } catch { CHM.set(c, { name: h?.name || '', subs: h?.subs || 0, t: Date.now() }); }
+      await sleep(400); } }
+  finally { chBusy = false; }
+}
+const chInfo = codes => { chFill(codes).catch(() => {}); return codes.map(c => ({ code: c, name: CHM.get(c)?.name || '', subs: CHM.get(c)?.subs || 0 })); };
 
 async function adminRoute(req, res, url, send) {
   const sub = url, J = o => send(200, JSON.stringify(o));
@@ -493,30 +554,47 @@ async function adminRoute(req, res, url, send) {
     const b = await readBody(req);
     if (adminOk(b.password || '')) {
       locks.delete(ip); const exp = String(Date.now() + 12 * 3600e3);
-      res.writeHead(200, { ...SEC, 'Content-Type': 'application/json', 'Set-Cookie': cookie(`${exp}.${sign(exp)}`, 43200) }); return res.end('{"ok":true}');
+      res.writeHead(200, { ...SEC, 'Content-Type': 'application/json', 'Set-Cookie': cookie(req, `${exp}.${sign(exp)}`, 43200) }); return res.end('{"ok":true}');
     }
     if (++lk.n >= 5) { lk.until = Date.now() + 15 * 60000; lk.n = 0; } locks.set(ip, lk);
     gfail++; await sleep(800 + Math.min(gfail * 150, 5000)); return send(401, '{"error":"Wrong password"}');
   }
   if (!authed(req)) return send(401, '{"error":"Unauthorized"}');
-  if (tooMany('adm' + ip, 3000)) return send(429, '{}');
+  if (tooMany('adm' + ip, 6000)) return send(429, '{}');
   const q = new URL(req.url, 'http://x').searchParams;
-  if (sub === '/api/logout') { res.writeHead(200, { ...SEC, 'Content-Type': 'application/json', 'Set-Cookie': cookie('', 0) }); return res.end('{"ok":true}'); }
-  if (sub === '/api/overview') { const mem = process.memoryUsage();
-    return J({ stats: (await dbGet(q.get('range') === 'all' ? 'stats/total' : 'stats/day/' + dayStr())) || {}, rss: mem.rss, heap: mem.heapUsed, up: (Date.now() - started) / 1000 | 0,
-      online: S.size, max: MAX, stored: Object.keys((await dbGet('sessions?shallow=true')) || {}).length }); }
-  if (sub === '/api/users') return J(Object.entries((await dbGet('users')) || {}).map(([id, v]) => ({ id, cmds: v.cmds || 0, last: v.last || 0, online: S.has(id), banned: banned.has(id) })));
+  if (sub === '/api/logout') { res.writeHead(200, { ...SEC, 'Content-Type': 'application/json', 'Set-Cookie': cookie(req, '', 0) }); return res.end('{"ok":true}'); }
+  if (sub === '/api/overview') { const mem = process.memoryUsage(), [today, all, st] = await Promise.all([dbGet('stats/day/' + dayStr()), dbGet('stats/total'), dbGet('sessions?shallow=true')]);
+    return J({ today: today || {}, all: all || {}, rss: mem.rss, heap: mem.heapUsed, ext: mem.external, heapLimit: require('v8').getHeapStatistics().heap_size_limit, up: (Date.now() - started) / 1000 | 0,
+      online: OPEN.size, running: S.size, max: MAX, stored: Object.keys(st || {}).length, ar: AR.size, banned: banned.size, node: process.version, samples: RAMS, jobs: JOBS.filter(j => j.status === 'running').length, day: dayStr(), tz: TZ, emojis: ALLOWED_LIST, maxVotes: MAX_VOTES, vph: VPH, botName: BOT_NAME }); }
+  if (sub === '/api/trend') { const n = Math.min(Math.max(+q.get('days') || 30, 1), 365), d = (await dbGet('stats/day?orderBy=%22$key%22&limitToLast=' + n)) || {}, out = [];
+    for (let i = n - 1; i >= 0; i--) { const k = new Date(Date.now() + TZ * 60000 - i * 864e5).toISOString().slice(0, 10), x = d[k] || {}; out.push({ d: k, linked: x.linked || 0, logouts: x.logouts || 0, cmds: x.cmds || 0, reacts: x.reacts || 0, votes: x.votes || 0, follows: x.follows || 0 }); }
+    return J(out); }
+  if (sub === '/api/cmds') { const r = q.get('range') || 'today'; let c = {};
+    if (r === 'all') c = (await dbGet('stats/total/c')) || {};
+    else if (r === 'today') c = (await dbGet(`stats/day/${dayStr()}/c`)) || {};
+    else for (const x of Object.values((await dbGet('stats/day?orderBy=%22$key%22&limitToLast=' + Math.min(+r || 7, 365))) || {})) for (const [k, n] of Object.entries(x.c || {})) c[k] = (c[k] || 0) + n;
+    return J(Object.entries(c).map(([cmd, n]) => ({ cmd, n })).sort((a, b) => b.n - a.n)); }
+  if (sub === '/api/bots') { const [ss, meta, us, coins] = await Promise.all(['sessions?shallow=true', 'meta', 'users', 'coins'].map(p => dbGet(p).then(x => x || {})));
+    return J(Object.keys(ss).map(id => { const u = us[id] || {}; return { id, online: OPEN.has(id), linkedAt: meta[id]?.linkedAt || 0, cmds: u.cmds || 0, reacts: u.reacts || 0, votes: u.votes || 0, last: u.last || 0, coins: +coins[id] || 0, ar: userAR(id).length, banned: banned.has(id) }; })); }
+  if (sub === '/api/users') { const [us, ss] = await Promise.all([dbGet('users'), dbGet('sessions?shallow=true')]);
+    return J(Object.entries(us || {}).map(([id, v]) => ({ id, cmds: v.cmds || 0, reacts: v.reacts || 0, votes: v.votes || 0, last: v.last || 0, online: OPEN.has(id), linked: !!(ss || {})[id], banned: banned.has(id) }))); }
   if (sub === '/api/user') { const id = String(q.get('id') || '').replace(/\D/g, '');
-    const [usage, c, meta, life] = await Promise.all(['usage/', 'cfg/', 'meta/', 'lifetime/'].map(p => dbGet(p + id)));
-    return J({ id, coins: await getCoins(id), ar: userAR(id).map(j => ({ link: j.link, exp: j.exp })), today: dayStr(), usage: usage || {}, cfg: c || {}, meta: meta || {}, life: life || {}, online: S.has(id), banned: banned.has(id) }); }
+    const [usage, c, meta, life, ref] = await Promise.all(['usage/', 'cfg/', 'meta/', 'lifetime/', 'refstats/'].map(p => dbGet(p + id)));
+    return J({ id, coins: await getCoins(id), ar: userAR(id).map(j => ({ link: j.link, em: j.em, paid: !!j.paid })), today: dayStr(), usage: usage || {}, cfg: c || {}, meta: meta || {}, life: life || {}, ref: ref || {}, online: OPEN.has(id), banned: banned.has(id) }); }
   if (sub === '/api/sessions') { const meta = (await dbGet('meta')) || {};
-    return J(Object.keys((await dbGet('sessions?shallow=true')) || {}).map(id => ({ id, online: S.has(id), linkedAt: meta[id]?.linkedAt || 0 }))); }
-  if (sub === '/api/events') return J(Object.values((await dbGet('events?orderBy=%22$key%22&limitToLast=150')) || {}).sort((x, y) => y.t - x.t));
-  if (sub === '/api/settings') return J({ owner: ST.owner, admins: [...ST.admins], follow: ST.follow, react: ST.react });
+    return J(Object.keys((await dbGet('sessions?shallow=true')) || {}).map(id => ({ id, online: OPEN.has(id), linkedAt: meta[id]?.linkedAt || 0 }))); }
+  if (sub === '/api/events') return J(Object.values((await dbGet('events?orderBy=%22$key%22&limitToLast=300')) || {}).sort((x, y) => y.t - x.t));
+  if (sub === '/api/chstats') { const d = (await dbGet('chstats')) || {}, top = Object.entries(d).map(([code, v]) => ({ code, reacts: v.reacts || 0, votes: v.votes || 0, n: v.n || 0, last: v.last || 0 })).sort((a, b) => b.reacts + b.votes - a.reacts - a.votes).slice(0, 60);
+    const info = Object.fromEntries(chInfo(top.slice(0, 25).map(x => x.code)).map(x => [x.code, x])); return J(top.map(x => ({ ...x, name: info[x.code]?.name || CHM.get(x.code)?.name || '', subs: CHM.get(x.code)?.subs || 0 }))); }
+  if (sub === '/api/channels') return J({ follow: chInfo(ST.follow), react: chInfo(Object.keys(ST.react)).map(x => ({ ...x, active: !!ST.react[x.code] })) });
+  if (sub === '/api/jobs') return J(JOBS);
+  if (sub === '/api/settings') return J({ owner: ST.owner, admins: [...ST.admins], follow: ST.follow, react: ST.react, banned: [...banned] });
   if (sub === '/api/act' && req.method === 'POST') {
     const b = await readBody(req), v = String(b.value || '').trim(), dg = v.replace(/\D/g, ''), code = v.includes('/channel/') ? codeOf(v) : v;
     const needCode = () => { if (!/^[\w-]{10,40}$/.test(code)) throw new Error('Invalid channel link'); };
-    try { switch (b.op) {
+    const needPost = () => { if (!isPost(v)) throw new Error('Link must be a channel POST link (with the post number at the end)'); return /channel\/([\w-]+)\/(\d+)/.exec(v); };
+    const emo = (t, d) => { const e = emojisOf([String(t || '')]); if (e.bad.length) throw new Error('Emoji not supported: ' + e.bad.slice(0, 5).join(' ') + ' (allowed: ' + ALLOWED_LIST.join(' ') + ')'); return e.ok.length ? e.ok : d; };
+    let job; try { switch (b.op) {
       case 'owner': ST.owner = dg; await dbSet('settings/owner', dg); break;
       case 'admin_add': ST.admins.add(dg); await dbSet('settings/admins/' + dg, 1); break;
       case 'admin_del': ST.admins.delete(dg); await dbDel('settings/admins/' + dg); break;
@@ -526,9 +604,15 @@ async function adminRoute(req, res, url, send) {
       case 'react_del': await autoDel(`https://whatsapp.com/channel/${code}`, OWNER_AUTO_API).catch(() => {}); delete ST.react[code]; await dbDel('settings/react/' + code); break;
       case 'ban': b.on ? banned.add(dg) : banned.delete(dg); b.on ? await dbSet('ban/' + dg, 1) : await dbDel('ban/' + dg); break;
       case 'remove': { const s2 = S.get(dg); if (s2) { try { await s2.logout(); } catch {} } else await wipe(dg); break; }
+      case 'coins_add': { const n = parseInt(b.amount, 10); if (!dg || !Number.isFinite(n)) throw new Error('Enter a number and an amount'); await addCoins(dg, n); break; }
+      case 'follow_now': needCode(); if (!OPEN.size) throw new Error('No bot is connected right now'); job = jobFollow(code); logEvent('admin_follow', code, {}); break;
+      case 'react_bots': { const m = needPost(); if (!OPEN.size) throw new Error('No bot is connected right now'); job = jobReact(m[1], m[2], emo(b.emojis, ALLOWED_LIST.slice(0, 3)), Math.max(0, parseInt(b.limit, 10) || 0), b.follow !== false); logEvent('admin_react_bots', m[1] + '/' + m[2], {}); break; }
+      case 'react_api': { needPost(); const amt = +b.amount === 5000 ? 5000 : 2000; await reactApi(amt, postLink(v), emo(b.emojis, ALLOWED_LIST.slice(0, 3)).join(',')); logEvent('admin_react_api', postLink(v).split('/channel/')[1], { n: amt }); break; }
+      case 'vote_api': { needPost(); const op = String(b.option || '').toLowerCase(), n = Math.min(Math.max(parseInt(b.votes, 10) || 100, 1), 10000), mins = Math.max(1, parseInt(b.minutes, 10) || Math.round(n / VPH * 60));
+        if (!['a', 'b', 'c'].includes(op)) throw new Error('Option must be a, b or c'); await voteApi(postLink(v), op, n, mins); logEvent('admin_vote', postLink(v).split('/channel/')[1], { n }); break; }
       default: return send(400, '{"error":"Unknown action"}');
     } } catch (e) { return send(400, JSON.stringify({ error: e.message })); }
-    return J({ ok: true });
+    return J({ ok: true, job });
   }
   send(404, '{"error":"Not found"}');
 }
@@ -569,7 +653,7 @@ http.createServer((req, res) => {
   try { if (!DB || !SECRET) throw new Error('FIREBASE_DB_URL / FIREBASE_SECRET are empty in config.js'); await dbSet('health', Date.now()); console.log('Firebase OK'); }
   catch (e) { console.error('Firebase FAILED:', e.message); }
   await loadSettings().catch(() => {}); syncReact();
-  await acquireLock(); await loadAR(); READY = true;
+  await acquireLock(); await loadAR(); await backfill().catch(e => console.error('backfill failed:', e.message)); READY = true;
   const ids = Object.keys((await dbGet('sessions?shallow=true').catch(() => null)) || {});
   ids.forEach(i => KNOWN.add(i));
   for (const id of ids) { await start(id).catch(() => {}); await sleep(START_DELAY); }
