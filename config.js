@@ -7,7 +7,7 @@ module.exports = {
   // ----- Identity -----
   BOT_NAME: 'VIRU MD',
   OWNER_NAME: 'VIRU DEV',               // name shown on the .owner contact card (its Message button opens the bot user's own number)
-  OWNER_NUMBER: '94XXXXXXXXX',          // FILL: your number, country code, digits only
+  OWNER_NUMBER: '94718120118',          // FILL: your number, country code, digits only
   PAIR_CODE: 'VIRUDEVS',                // exactly 8 letters/numbers
   PREFIX: '.',
   PORT: 3000,                           // Railway sets PORT by itself; this is only the fallback (no Railway variables needed)
