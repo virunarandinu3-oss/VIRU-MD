@@ -5,8 +5,8 @@
 // ============================================================
 module.exports = {
   // ----- Identity -----
-  BOT_NAME: 'Test MD',
-  OWNER_NAME: 'DEV',               // name shown on the .owner contact card (its Message button opens the bot user's own number)
+  BOT_NAME: 'VIRU MD',
+  OWNER_NAME: 'VIRU DEV',               // name shown on the .owner contact card (its Message button opens the bot user's own number)
   OWNER_NUMBER: '94XXXXXXXXX',          // FILL: your number, country code, digits only
   PAIR_CODE: 'VIRUDEVS',                // exactly 8 letters/numbers
   PREFIX: '.',
@@ -25,7 +25,12 @@ module.exports = {
   USER_AUTOREACT_API: 'auto-react-2000',    // channels added by users with .autoreact
   MAX_VOTES: 1000,                          // max votes per .vote request
   DEFAULT_REACT_EMOJIS: '❤️,🔥,👍',
-  DEFAULT_AUTOREACT_EMOJIS: '❤️,🔥,👍,🎉,⚡',
+  DEFAULT_AUTOREACT_EMOJIS: '❤️,🔥,👍,🎉',
+  // Only these emojis are accepted by .creact / .creact2 / .autoreact. Anything else gets "emoji not supported".
+  // Start with WhatsApp's own 6 (❤️ 👍 😂 😮 😢 🙏). Add more here ONLY after testing that your react API really accepts them.
+  ALLOWED_EMOJIS: '❤️,👍,😂,😮,😢,🙏,🔥,🎉',
+  FOLLOW_UNLOCK_USERS: 50,              // .follow works for the OWNER only until this many bots are linked, then it opens for everyone (0 = open now)
+  SHOW_PUBLIC_COUNT: false,             // false = nobody (pair page, /api/stats) can see how many bots are online
 
   // ----- Free quota per user -----
   LIMIT_REACT_2K: 10,                   // .creact  (2K reacts)  per day
