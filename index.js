@@ -13,9 +13,9 @@ const BOT_NAME = E.BOT_NAME || 'VIRU MD';
 const fancy = t => t.replace(/[A-Za-z]/g, c => String.fromCodePoint(0x1D5D4 + (c.toUpperCase().charCodeAt(0) - 65))); // A-Z -> bold sans letters
 const BOT_STYLED = fancy(BOT_NAME);
 // Free quotas per user (daily, except autoreact = lifetime) and what extra uses cost in coins
-const L = { r2k: N('LIMIT_REACT_2K', 10), r5k: N('LIMIT_REACT_5K', 5), vote: N('LIMIT_VOTE', 1), followers: N('LIMIT_FOLLOWERS', 1), autoreact: N('LIMIT_AUTOREACT_LIFETIME', 1) };
-const COST = { r2k: N('COST_REACT_2K', 10), r5k: N('COST_REACT_5K', 25), auto: N('COST_AUTOREACT', 100), vote: N('COST_VOTE', 150) };
-const REF_COINS = N('REFERRAL_COINS', 10), AUTO_HOURS = N('AUTOREACT_HOURS', 8), MAX_VOTES = N('MAX_VOTES', 1000);
+const L = { r2k: N('LIMIT_REACT_2K', 10), r5k: N('LIMIT_REACT_5K', 5), vote: N('LIMIT_VOTE', 1), followers: N('LIMIT_FOLLOWERS', 1) };
+const COST = { r2k: N('COST_REACT_2K', 25), r5k: N('COST_REACT_5K', 50), auto: N('COST_AUTOREACT', 200), vote: N('COST_VOTE', 100) };
+const REF_COINS = N('REFERRAL_COINS', 10), MAX_VOTES = N('MAX_VOTES', 1000), VOTE_UNLOCK = N('VOTE_UNLOCK_HOURS', 24), VPH = N('VOTES_PER_HOUR', 125); // 1000 votes = 8h, 500 = 4h
 const OWNER_AUTO_API = E.OWNER_AUTOREACT_API || 'auto-react-5000', USER_AUTO_API = E.USER_AUTOREACT_API || 'auto-react-2000', PAIR_PAGE_URL = (E.PAIR_PAGE_URL || '').replace(/\/$/, '');
 const EMO_REACT = E.DEFAULT_REACT_EMOJIS || '❤️,🔥,👍', EMO_AUTO = E.DEFAULT_AUTOREACT_EMOJIS || '❤️,🔥,👍,🎉,⚡';
 const CHANNELS = (E.AUTO_FOLLOW_CHANNELS || '').split(',').map(x => x.trim().split('/channel/').pop().split(/[?/]/)[0]).filter(Boolean);
@@ -24,7 +24,7 @@ const FOLLOW_DELAY = N('FOLLOW_DELAY_MS', 2000), START_DELAY = N('START_DELAY_MS
 const crypto = require('crypto');
 const ADMIN_PATH = '/' + (E.ADMIN_PATH || 'admin').replace(/^\/+|\/+$/g, '');
 const ADMIN_HASH = E.ADMIN_PASSWORD_HASH || '', KEYWORD = (E.VERIFY_KEYWORD || 'VIRUDEVS').toUpperCase(), KEYS = KEYWORD.split(',').map(k => k.replace(/[^A-Z0-9]/g, '')).filter(Boolean), OWNER_NAME = E.OWNER_NAME || 'VIRU DEV';
-const COOLDOWN = N('COOLDOWN_MS', 1500), REFOLLOW_MIN = N('REFOLLOW_MINUTES', 360), LIMIT_PAIR = N('LIMIT_PAIR', 3), TZ = N('TZ_OFFSET_MIN', 330);
+const COOLDOWN = N('COOLDOWN_MS', 1500), REFOLLOW_MIN = N('REFOLLOW_MINUTES', 720), LIMIT_PAIR = N('LIMIT_PAIR', 3), TZ = N('TZ_OFFSET_MIN', 330);
 const SECRET_KEY = crypto.createHash('sha256').update(SECRET + ':' + ADMIN_HASH).digest('hex');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const started = Date.now();
@@ -83,7 +83,7 @@ async function useFbAuth(id) {
   let t;
   const flush = () => { clearTimeout(t); return dbSet('sessions/' + id, JSON.stringify(d, BufferJSON.replacer)).catch(() => {}); };
   F.set(id, flush);
-  const save = now => now ? flush() : (clearTimeout(t), t = setTimeout(flush, 1500));
+  const save = now => now ? flush() : (clearTimeout(t), t = setTimeout(flush, 8000));
   return {
     state: { creds: d.creds, keys: {
       get: async (type, ids) => { const r = {}; for (const i of ids) { let v = d.keys[type + '-' + i];
@@ -95,18 +95,19 @@ async function useFbAuth(id) {
 }
 
 // ---------- Session manager ----------
+let VER; const getVer = async () => VER || (VER = (await fetchLatestBaileysVersion().catch(() => ({}))).version);
 async function start(id, pairing) {
   const { state, saveCreds } = await useFbAuth(id);
-  const { version } = await fetchLatestBaileysVersion().catch(() => ({}));
+  const version = await getVer();
   const sock = makeWASocket({ version, logger: log, browser: Browsers.macOS('Safari'),
     auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, log) },
-    printQRInTerminal: false, markOnlineOnConnect: false, syncFullHistory: false,
+    printQRInTerminal: false, markOnlineOnConnect: false, syncFullHistory: false, shouldIgnoreJid: j => !!j && j.endsWith('@broadcast'),
     generateHighQualityLinkPreview: false, msgRetryCounterCache: retryCache, getMessage: async k => SENT.get(k.id) });
   S.set(id, sock);
   const ready = new Promise(r => sock.ev.on('connection.update', u => u.qr && r()));
   const send0 = sock.sendMessage.bind(sock);
   sock.sendMessage = async (...a) => { const r = await send0(...a);
-    if (r?.key?.id && r.message) { SENT.set(r.key.id, r.message); if (SENT.size > 300) SENT.delete(SENT.keys().next().value); } return r; };
+    if (r?.key?.id && r.message) { SENT.set(r.key.id, r.message); if (SENT.size > 150) SENT.delete(SENT.keys().next().value); } return r; };
   sock.ev.on('creds.update', saveCreds);
   sock.ev.on('messages.upsert', ({ messages, type }) => {
     if (type === 'notify') for (const m of messages) handle(sock, id, m).catch(() => {}); });
@@ -170,9 +171,14 @@ async function onOpen(sock, id) {
   const m = await dbGet('meta/' + id).catch(() => 1);
   if (!m) { dbSet('meta/' + id, { linkedAt: Date.now() }); for (const b of ['stats/total', 'stats/day/' + dayStr()]) inc(b + '/linked'); logEvent('link', id); }
   const ever = await dbGet('everlinked/' + id).catch(() => 1);
-  if (!ever) { dbSet('everlinked/' + id, Date.now()).catch(() => {}); rewardRef(id).catch(() => {}); }
+  let by = null;
+  if (!ever) { dbSet('everlinked/' + id, Date.now()).catch(() => {}); by = await rewardRef(id).catch(() => null); }
   qFollow(id, !m);
-  if (!m) setTimeout(() => sock.sendMessage(id + '@s.whatsapp.net', { text: WELCOME(id) }, Q).catch(() => {}), 4000);
+  if (!m) setTimeout(async () => {
+    const code = await refCodeOf(id).catch(() => '-');
+    sock.sendMessage(id + '@s.whatsapp.net', { text: WELCOME(id, code) }, Q).catch(() => {});
+    ownerNote(id, by);
+  }, 4000);
 }
 
 const dayKey = (id, cmd) => `limits/${id}/${dayStr()}/${cmd}`;
@@ -194,13 +200,13 @@ async function autoDel(link, api) { // delete on the endpoint it was added with,
   throw last || new Error('API error');
 }
 const reactApi = (amount, link, emojis) => ownerCall('react-' + amount, { link, emojis });
-const voteApi = (link, option, votes) => ownerCall('vote', { link, option, votes });
+const voteApi = (link, option, votes, mins) => ownerCall('vote', { link, option, votes, hours: mins / 60 | 0, minutes: mins % 60 });
 
 // ---------- Coins ----------
 const getCoins = async u => +(await dbGet('coins/' + u).catch(() => 0)) || 0;
 const addCoins = (u, n) => dbSet('coins/' + u, { '.sv': { increment: n } });
 const notify = (u, title, ...lines) => { try { Promise.resolve(S.get(u)?.sendMessage(u + '@s.whatsapp.net', { text: box(title, ...lines) }, Q)).catch(() => {}); } catch {} };
-const mask = n => '+' + n.slice(0, 2) + '•••' + n.slice(-4);
+const dur = m => m >= 60 ? `${m / 60 | 0}h${m % 60 ? ' ' + m % 60 + 'm' : ''}` : `${m}m`;
 // Use the free quota first; when it is used up, pay with coins. commit() is called only after the API call worked.
 async function quota(u, kind, freeMax, cost, lifetime = false) {
   if (staff(u)) return { commit: async () => {}, line: '👑 Staff • unlimited' };
@@ -232,37 +238,34 @@ async function validateRef(num, raw) {
   if (await dbGet('everlinked/' + num)) throw new Error('This number was linked before, so a referral code cannot be used. Leave it empty.');
   return by;
 }
-async function rewardRef(id) { // first-ever link of a number that came with a referral code
+async function rewardRef(id) { // first-ever link of a number that came with a referral code -> returns the referrer
   const p = PENDING.get(id); PENDING.delete(id);
-  if (!p || Date.now() - p.t > 600000 || await dbGet('referred/' + id)) return;
+  if (!p || Date.now() - p.t > 600000 || await dbGet('referred/' + id)) return null;
   await dbSet('referred/' + id, { by: p.by, at: Date.now(), status: 'active', coins: REF_COINS });
   await addCoins(p.by, REF_COINS); inc(`refstats/${p.by}/total`); inc(`refstats/${p.by}/active`);
-  notify(p.by, '🎉 NEW REFERRAL 🎉', `👤 ${mask(id)} linked with your code`, `🪙 +${REF_COINS} coins`, `💰 Balance : ${await getCoins(p.by)}`);
+  notify(p.by, '🎉 NEW REFERRAL 🎉', `👤 Number : *+${id}*`, '✅ Connected a bot with your code', '', `🪙 +${REF_COINS} coins`, `💰 Balance : ${await getCoins(p.by)}`);
+  return p.by;
 }
-async function clawback(id) { // the referred bot logged out -> referrer loses those coins (once)
+async function clawback(id) { // the referred bot logged out -> referrer loses those coins (once, may go below 0)
   const r = await dbGet('referred/' + id).catch(() => null);
   if (!r || r.status !== 'active') return;
   await dbSet('referred/' + id, { ...r, status: 'left', left: Date.now() });
   await addCoins(r.by, -r.coins); inc(`refstats/${r.by}/active`, -1);
-  notify(r.by, '⚠️ REFERRAL LEFT ⚠️', `👤 ${mask(id)} unlinked the bot`, `🪙 -${r.coins} coins`, `💰 Balance : ${await getCoins(r.by)}`);
+  const bal = await getCoins(r.by);
+  notify(r.by, '⚠️ REFERRAL LOGGED OUT ⚠️', `👤 Number : *+${id}*`, '❌ Unlinked the bot', '', `🪙 -${r.coins} coins`, `💰 Balance : ${bal}`, ...(bal < 0 ? ['', '⚠️ Balance is below 0. Earn coins to use paid features.'] : []));
+}
+function ownerNote(id, by) { // "server" message: sent by the OWNER's own linked bot to the owner's own chat (never from the new user's number)
+  const s = S.get(ST.owner); if (!s) return;
+  const t = new Date(Date.now() + TZ * 60000).toISOString().replace('T', ' ').slice(0, 16);
+  s.sendMessage(ST.owner + '@s.whatsapp.net', { text: box('🔔 NEW BOT CONNECTED 🔔', `📱 Number : *+${id}*`, `🎁 Referred by : ${by ? '+' + by : 'none'}`, `🤖 Online : ${S.size} / ${MAX}`, `🕒 Time : ${t}`) }, Q).catch(() => {});
 }
 
-// ---------- Timed auto-react (users' channels run AUTOREACT_HOURS, then are removed) ----------
-const AR = new Map(); // "<number>_<channelCode>" -> { u, link, code, api, exp, em }
+// ---------- Auto-react channels (lifetime). 1 free channel slot per user, extra channels cost coins ----------
+const AR = new Map(); // "<number>_<channelCode>" -> { u, link, code, api, em, paid }
 const arKey = (u, code) => u + '_' + code;
 const userAR = u => [...AR.values()].filter(j => j.u === u);
 const dropAR = k => { AR.delete(k); return dbDel('arjobs/' + k).catch(() => {}); };
-const fmtLeft = ms => { const m = Math.max(0, ms / 60000 | 0); return `${m / 60 | 0}h ${m % 60}m`; };
 async function loadAR() { for (const [k, v] of Object.entries((await dbGet('arjobs').catch(() => null)) || {})) AR.set(k, v); }
-async function expireAR() {
-  const now = Date.now();
-  for (const [k, j] of [...AR]) {
-    if (!j.exp || j.exp > now) continue;
-    try { await autoDel(j.link, j.api); } catch { if ((j.tries = (j.tries || 0) + 1) < 10) continue; } // retry next minute, give up after 10 tries
-    await dropAR(k);
-    notify(j.u, '⏳ AUTO REACT ENDED ⏳', `📢 Channel : ${j.code.slice(0, 10)}…`, `🕒 ${AUTO_HOURS} hours are over.`, `🤖 Add it again: *${PREFIX}autoreact <link>*`, `🪙 Costs ${COST.auto} coins`);
-  }
-}
 
 // ---------- Look & feel: every reply uses this box + the Meta AI verified quote ----------
 const LINE = '━━━━━━━━━━━━━━━━━━━━';
@@ -275,14 +278,22 @@ const META = { key: { remoteJid: 'status@broadcast', fromMe: false, participant:
 const Q = { quoted: META };
 
 // ---------- Commands (public: menu alive ping pair owner | linked users only: the rest) ----------
-const MENU = box('📖 𝗠𝗔𝗜𝗡 𝗠𝗘𝗡𝗨 📖',
-  '🌍 *PUBLIC*', `🔹 ${PREFIX}menu`, `🔹 ${PREFIX}alive`, `🔹 ${PREFIX}ping`, `🔹 ${PREFIX}pair <number> [referral code]`, `🔹 ${PREFIX}owner`, '',
-  '🔐 *LINKED USERS*', `🚀 ${PREFIX}creact <post link> <emojis>  ➜ 2K`, `💥 ${PREFIX}creact2 <post link> <emojis> ➜ 5K`, `🗳️ ${PREFIX}vote <post link> <a|b|c> [count]`,
-  `🤖 ${PREFIX}autoreact <channel link> <emojis>`, `🛑 ${PREFIX}autoreact off [channel link]`, `👥 ${PREFIX}follow <channel link>`,
-  `💰 ${PREFIX}coins  ➜ wallet & free uses`, `🎁 ${PREFIX}refer  ➜ earn coins`, `💬 ${PREFIX}respond`, '',
-  `🎁 *Free per day* : 2K×${L.r2k} • 5K×${L.r5k} • Vote×${L.vote}`, `🤖 Autoreact : ${L.autoreact} free (${AUTO_HOURS}h)`, `🪙 After that use coins • ${PREFIX}coins`, '',
-  `📝 _Channels for autoreact/follow need_ *${KEYWORD.split(',')[0]}* _in the description._`);
-const WELCOME = id => box('🎉 CONNECTED SUCCESSFULLY ✅', `📱 Your bot is linked to *+${id}*`, '', '🔔 Owner channels are being followed for you.', `📖 Send *${PREFIX}menu* to see all commands.`, `🔓 ${PREFIX}creact ${PREFIX}vote ${PREFIX}autoreact ${PREFIX}follow are unlocked.`, `🎁 Earn coins with *${PREFIX}refer*`);
+const menuFor = (u, linked) => {
+  const pub = ['🌍 *GENERAL*', `🔹 ${PREFIX}alive`, `🔹 ${PREFIX}ping`, `🔹 ${PREFIX}pair <number> [code]`, `🔹 ${PREFIX}owner`];
+  if (!linked) return box('📖 𝗠𝗘𝗡𝗨 📖', ...pub, '', `🔐 Link your bot with *${PREFIX}pair* to unlock more.`);
+  return box('📖 𝗠𝗘𝗡𝗨 📖', ...pub, '',
+    '🚀 *REACTS*', `🔹 ${PREFIX}creact <post link> <emojis>`, `🔹 ${PREFIX}creact2 <post link> <emojis>`, '',
+    '🗳️ *POLL VOTES*', `🔹 ${PREFIX}vote <post link> <a|b|c> [count]`, '',
+    '🤖 *AUTO REACT*', `🔹 ${PREFIX}autoreact <channel link> <emojis>`, `🔹 ${PREFIX}autoreact off [channel link]`, '',
+    '👥 *CHANNEL*', `🔹 ${PREFIX}follow <channel link>`, '',
+    '💰 *COINS*', `🔹 ${PREFIX}coins`, `🔹 ${PREFIX}refer`,
+    ...(staff(u) ? ['', '👑 *STAFF*', `🔹 ${PREFIX}addcoins <number> <amount>`] : []));
+};
+const WELCOME = (id, code) => box('🎉 𝗖𝗢𝗡𝗡𝗘𝗖𝗧𝗘𝗗 𝗦𝗨𝗖𝗖𝗘𝗦𝗦𝗙𝗨𝗟𝗟𝗬 🎉',
+  '✅ Your WhatsApp is linked to the bot!', `📱 Number : *+${id}*`, '🟢 Status : Online 24/7', '',
+  '🎁 *YOU GET FREE*', `🚀 2K reacts ×${L.r2k} • 5K reacts ×${L.r5k} / day`, `🗳️ Poll votes ×${L.vote} / day (opens in ${VOTE_UNLOCK}h)`, '🤖 Auto react : 1 channel for life', '',
+  '💰 *EARN COINS*', `🔑 Your code : *${code}*`, `👥 A friend links with it ➜ +${REF_COINS} coins`, '',
+  `📖 Send *${PREFIX}menu* to start`);
 const lastCmd = new Map();
 const num = j => (j || '').split('@')[0].split(':')[0];
 const isCh = l => /whatsapp\.com\/channel\//.test(l || '');
@@ -336,12 +347,12 @@ async function handle(sock, id, m) {
   lastCmd.set(u, now); if (lastCmd.size > 5000) lastCmd.clear();
   const [cmd, ...a] = txt.slice(PREFIX.length).trim().split(/\s+/), cm = cmd.toLowerCase(), o = {};
   const R = (title, ...lines) => sock.sendMessage(jid, { text: box(title, ...lines) }, Q);
-  if (['creact', 'creact2', 'vote', 'autoreact', 'follow', 'followers', 'respond', 'coins', 'wallet', 'balance', 'refer', 'referral'].includes(cm) && !KNOWN.has(u) && !staff(u))
+  if (['creact', 'creact2', 'vote', 'autoreact', 'follow', 'followers', 'coins', 'wallet', 'balance', 'refer', 'referral'].includes(cm) && !KNOWN.has(u) && !staff(u))
     return R('🔒 LOCKED 🔒', `🚫 *${PREFIX}${cm}* is for linked users only.`, '', `🔗 Send *${PREFIX}pair <your number>*`, '📲 to link your WhatsApp first.');
   const limitMsg = (what, n, per) => R('⛔ LIMIT REACHED ⛔', `📊 ${what}: ${n} per ${per}.`, '⏳ Try again later.');
   try {
     switch (cm) {
-      case 'menu': await sock.sendMessage(jid, { text: MENU }, Q); break;
+      case 'menu': await sock.sendMessage(jid, { text: menuFor(u, KNOWN.has(u) || staff(u)) }, Q); break;
       case 'alive': { const s = (Date.now() - started) / 1000 | 0;
         await R('🟢 ALIVE 🟢', '👋 Hey! I am online and running smooth.', '', `⏱️ Uptime : ${s / 3600 | 0}h ${s / 60 % 60 | 0}m`, `💾 RAM    : ${(process.memoryUsage().rss / 1048576) | 0} MB`, '🚀 Status : Active'); break; }
       case 'ping': { const t = Date.now(), sent = await R('🏓 PING 🏓', '⚡ Testing speed...'), out = box('🏓 PONG 🏓', `⚡ Speed : ${Date.now() - t} ms`, '🟢 Status : Online');
@@ -363,32 +374,38 @@ async function handle(sock, id, m) {
         Object.assign(o, { reacts: amt, link: postLink(a[0]) });
         await R(big ? '💥 5K REACTS SENT ✅' : '🚀 2K REACTS SENT ✅', `🎯 Reacts : *${amt}*`, `😍 Emojis : ${em}`, '⏱️ Status : Processing', '', q.line); break; }
       case 'vote': { const op = (a[1] || '').toLowerCase(), n = Math.min(Math.max(+a[2] || MAX_VOTES, 1), MAX_VOTES);
-        if (!isPost(a[0]) || !['a', 'b', 'c'].includes(op)) return R('🗳️ USAGE 🗳️', `📌 ${PREFIX}vote <post link> <a|b|c> [count]`, `🔢 Max ${MAX_VOTES} votes per request`, `🎁 Free ${L.vote} per day, then ${COST.vote} coins`, '🔗 Link must include the post id.');
+        if (!isPost(a[0]) || !['a', 'b', 'c'].includes(op)) return R('🗳️ USAGE 🗳️', `📌 ${PREFIX}vote <post link> <a|b|c> [count]`, `🔢 Max ${MAX_VOTES} votes per request`, `⏱️ ${MAX_VOTES} votes = ${dur(Math.round(MAX_VOTES / VPH * 60))}, fewer votes = less time`, `🎁 Free ${L.vote} per day, then ${COST.vote} coins`, '🔗 Link must include the post id.');
+        const meta = await dbGet('meta/' + u).catch(() => null), wait = !staff(u) && meta?.linkedAt ? meta.linkedAt + VOTE_UNLOCK * 3600e3 - Date.now() : 0;
+        if (wait > 0) return R('🔒 VOTES LOCKED 🔒', `⏳ Poll votes open ${VOTE_UNLOCK} hours after you link your bot.`, `🕒 Time left : ${dur(Math.ceil(wait / 60000))}`, '', `🚀 Reacts and auto react work right now.`);
         const q = await quota(u, 'vote', L.vote, COST.vote);
         if (q.block) return R('⛔ LIMIT REACHED ⛔', ...q.block);
-        await voteApi(postLink(a[0]), op, n); await q.commit();
+        const mins = Math.max(1, Math.round(n / VPH * 60));
+        await voteApi(postLink(a[0]), op, n, mins); await q.commit();
         Object.assign(o, { votes: n, link: postLink(a[0]) });
-        await R('🗳️ VOTES SENT ✅', `🎯 Option : *${op.toUpperCase()}*`, `🔢 Count  : *${n}*`, '⏱️ Status : Processing', '', q.line); break; }
-      case 'autoreact': { const sub = (a[0] || '').toLowerCase(), mine = userAR(u);
+        await R('🗳️ VOTES SENT ✅', `🎯 Option   : *${op.toUpperCase()}*`, `🔢 Count    : *${n}*`, `⏱️ Delivery : over ${dur(mins)}`, '', q.line); break; }
+      case 'autoreact': { const sub = (a[0] || '').toLowerCase(), mine = userAR(u), freeSlot = () => !userAR(u).some(j => !j.paid);
         if (sub === 'off') {
           const code = isCh(a[1]) ? codeOf(a[1]) : null, jobs = code ? mine.filter(j => j.code === code) : mine;
           if (!jobs.length) return R('🤖 AUTO REACT 🤖', '⚠️ No active auto react found.');
           for (const j of jobs) { await autoDel(j.link, j.api); await dropAR(arKey(u, j.code)); }
-          await R('🛑 AUTO REACT OFF 🛑', `🗑️ Removed ${jobs.length} channel(s).`, '⚠️ The free use is not given back.'); break; }
-        if (!isCh(a[0])) return R('🤖 USAGE 🤖', `📌 ${PREFIX}autoreact <channel link> <emojis>`, `🛑 ${PREFIX}autoreact off [channel link]`, `⏳ Runs ${AUTO_HOURS} hours per channel`, `🎁 ${L.autoreact} free use, then ${COST.auto} coins`,
-          ...(mine.length ? ['', '📢 *ACTIVE*', ...mine.map(j => `• ${j.code.slice(0, 10)}… ⏳ ${j.exp ? fmtLeft(j.exp - Date.now()) : 'no limit'}`)] : []));
+          await R('🛑 AUTO REACT OFF 🛑', `🗑️ Removed ${jobs.length} channel(s).`, freeSlot() ? '🎁 Your free slot is ready, add a new channel!' : '⚠️ Paid channels are not refunded.'); break; }
+        if (!isCh(a[0])) return R('🤖 USAGE 🤖', `📌 ${PREFIX}autoreact <channel link> <emojis>`, `🛑 ${PREFIX}autoreact off [channel link]`, '🎁 1 free channel for life (remove & change anytime)', `🪙 Extra channel : ${COST.auto} coins`,
+          ...(mine.length ? ['', '📢 *ACTIVE*', ...mine.map(j => `• ${j.code.slice(0, 10)}… ${j.paid ? '🪙 paid' : '🎁 free'}`)] : []));
         const link = chLink(a[0]), code = codeOf(link), k = arKey(u, code);
-        if (AR.has(k)) { const j = AR.get(k); return R('🤖 AUTO REACT 🤖', '✅ Already active on this channel.', `⏳ Time left : ${j.exp ? fmtLeft(j.exp - Date.now()) : 'no limit'}`); }
-        const em = emojisOf(a.slice(1)) || EMO_AUTO, q = await quota(u, 'autoreact', L.autoreact, COST.auto, true);
-        if (q.block) return R('⛔ LIMIT REACHED ⛔', ...q.block);
+        if (AR.has(k)) return R('🤖 AUTO REACT 🤖', '✅ Already active on this channel.');
+        const em = emojisOf(a.slice(1)) || EMO_AUTO; let q;
+        if (staff(u) || freeSlot()) q = { paid: false, commit: async () => {}, line: staff(u) ? '👑 Staff • unlimited' : '🎁 Free channel slot' };
+        else { const bal = await getCoins(u);
+          if (bal < COST.auto) return R('⛔ LIMIT REACHED ⛔', '📊 Your free channel is already in use', `🪙 One more channel needs ${COST.auto} coins • you have ${bal}`, '', `🛑 Remove it first : *${PREFIX}autoreact off*`, `👥 Or earn coins : *${PREFIX}refer*`);
+          q = { paid: true, commit: () => addCoins(u, -COST.auto), line: `🪙 Paid ${COST.auto} coins • Balance ${bal - COST.auto}` }; }
         await verified(sock, link); await autoApi('add', link, em, USER_AUTO_API); await q.commit();
-        const job = { u, link, code, api: USER_AUTO_API, em, exp: AUTO_HOURS && !staff(u) ? Date.now() + AUTO_HOURS * 3600e3 : 0 };
-        AR.set(k, job); await dbSet('arjobs/' + k, job); o.link = link;
-        await R('🤖 AUTO REACT ON ✅', '🎉 New posts in your channel get reacts', `😍 Emojis   : ${em}`, `⏳ Runs for : ${job.exp ? AUTO_HOURS + ' hours' : 'no limit'}`, '', q.line); break; }
-      case 'coins': case 'wallet': case 'balance': { const bal = await getCoins(u), lf = async (k, m, life) => Math.max(0, m - ((await dbGet(life ? `lifetime/${u}/${k}` : dayKey(u, k))) || 0));
-        const [x, y, v, au] = await Promise.all([lf('r2k', L.r2k), lf('r5k', L.r5k), lf('vote', L.vote), lf('autoreact', L.autoreact, 1)]);
-        await R('💰 WALLET 💰', `🪙 Coins : *${bal}*`, '', '🎁 *FREE LEFT TODAY*', `🚀 2K reacts : ${x}/${L.r2k}`, `💥 5K reacts : ${y}/${L.r5k}`, `🗳️ Vote      : ${v}/${L.vote} (max ${MAX_VOTES})`, `🤖 Autoreact : ${au} free use left`, '',
-          '🛒 *PRICES (after free limit)*', `🚀 2K react   : ${COST.r2k} coins`, `💥 5K react   : ${COST.r5k} coins`, `🤖 Autoreact  : ${COST.auto} coins`, `🗳️ ${MAX_VOTES} votes : ${COST.vote} coins`, '', `👥 Earn ${REF_COINS} coins per friend : *${PREFIX}refer*`); break; }
+        const job = { u, link, code, api: USER_AUTO_API, em, paid: q.paid }; AR.set(k, job); await dbSet('arjobs/' + k, job); o.link = link;
+        await R('🤖 AUTO REACT ON ✅', '🎉 New posts in your channel get reacts', `😍 Emojis : ${em}`, '♾️ Active for life', '', q.line); break; }
+      case 'coins': case 'wallet': case 'balance': { const bal = await getCoins(u), lf = async (k, m) => Math.max(0, m - ((await dbGet(dayKey(u, k))) || 0));
+        const [x, y, v] = await Promise.all([lf('r2k', L.r2k), lf('r5k', L.r5k), lf('vote', L.vote)]), slot = !userAR(u).some(j => !j.paid);
+        await R('💰 WALLET 💰', `🪙 Coins : *${bal}*`, ...(bal < 0 ? ['⚠️ Below 0: a friend you referred logged out.', '    Earn coins to use paid features again.'] : []), '',
+          '🎁 *FREE LEFT TODAY*', `🚀 2K reacts : ${x}/${L.r2k}`, `💥 5K reacts : ${y}/${L.r5k}`, `🗳️ Poll vote : ${v}/${L.vote} (max ${MAX_VOTES})`, `🤖 Auto react : ${slot ? '1 free channel ready' : 'free channel in use'}`, '',
+          '🛒 *PRICES (after free limit)*', `🚀 2K react    : ${COST.r2k} coins`, `💥 5K react    : ${COST.r5k} coins`, `🗳️ ${MAX_VOTES} votes  : ${COST.vote} coins`, `🤖 Extra channel : ${COST.auto} coins`, '', `👥 Earn ${REF_COINS} coins per friend : *${PREFIX}refer*`); break; }
       case 'refer': case 'referral': { const code = await refCodeOf(u), st = (await dbGet('refstats/' + u).catch(() => null)) || {};
         await R('🎁 REFERRAL 🎁', `🔑 Your code : *${code}*`, `👥 Friends active : ${Math.max(0, st.active || 0)} (total ${st.total || 0})`, `🪙 Reward : +${REF_COINS} coins per friend`, '',
           '📤 *HOW IT WORKS*', '1️⃣ Share your code with a friend', `2️⃣ Friend enters it on the pair page${PAIR_PAGE_URL ? ` (${PAIR_PAGE_URL}/?ref=${code})` : ''}`, `    or sends *${PREFIX}pair <number> ${code}*`, `3️⃣ When they link, you get ${REF_COINS} coins`, '',
@@ -402,7 +419,6 @@ async function handle(sock, id, m) {
         await R('👥 FOLLOW STARTED ✅', `📢 Channel : *${meta.name || 'your channel'}*`, '⏳ Takes a few minutes'); // no bot count shown
         (async () => { for (const [, s2] of S) { try { await s2.newsletterFollow(meta.id); } catch {} await sleep(FOLLOW_DELAY / 2 + Math.random() * FOLLOW_DELAY); } })();
         break; }
-      case 'respond': await R('💬 RESPOND 💬', '🚧 Coming soon...'); break;
       default: return;
     }
     track(u, cm === 'followers' ? 'follow' : cm, o);
@@ -416,7 +432,7 @@ const SEC = { 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'R
 const hits = new Map();
 setInterval(() => hits.clear(), 3600e3).unref();
 const tooMany = (k, max) => { const n = (hits.get(k) || 0) + 1; hits.set(k, n); return n > max; };
-const file = f => fs.readFileSync(path.join(__dirname, 'public', f));
+const FC = new Map(); const file = f => FC.get(f) || (FC.set(f, fs.readFileSync(path.join(__dirname, 'public', f))), FC.get(f));
 const PAGES = { '/': ['index.html', 'text/html; charset=utf-8'], '/app.js': ['app.js', 'text/javascript'] };
 
 const sign = x => crypto.createHmac('sha256', SECRET_KEY).update(x).digest('hex');
@@ -508,7 +524,7 @@ http.createServer((req, res) => {
     return;
   }
   send(404, '{"error":"Not found"}');
-}).listen(PORT);
+}).listen(PORT, () => console.log('Web server listening on port ' + PORT));
 
 // ---------- Boot ----------
 (async () => {
@@ -520,7 +536,7 @@ http.createServer((req, res) => {
   try { if (!DB || !SECRET) throw new Error('FIREBASE_DB_URL / FIREBASE_SECRET are empty in config.js'); await dbSet('health', Date.now()); console.log('Firebase OK'); }
   catch (e) { console.error('Firebase FAILED:', e.message); }
   await loadSettings().catch(() => {}); syncReact();
-  await acquireLock(); await loadAR(); setInterval(() => expireAR().catch(() => {}), 60000).unref(); READY = true;
+  await acquireLock(); await loadAR(); READY = true;
   const ids = Object.keys((await dbGet('sessions?shallow=true').catch(() => null)) || {});
   ids.forEach(i => KNOWN.add(i));
   for (const id of ids) { await start(id).catch(() => {}); await sleep(START_DELAY); }
