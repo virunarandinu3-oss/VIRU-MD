@@ -30,7 +30,6 @@ module.exports = {
   // Start with WhatsApp's own 6 (❤️ 👍 😂 😮 😢 🙏). Add more here ONLY after testing that your react API really accepts them.
   ALLOWED_EMOJIS: '❤️,👍,😂,😮,😢,🙏,🔥,🎉',
   FOLLOW_UNLOCK_USERS: 50,              // .follow works for the OWNER only until this many bots are linked, then it opens for everyone (0 = open now)
-  SHOW_PUBLIC_COUNT: false,             // false = nobody (pair page, /api/stats) can see how many bots are online
 
   // ----- Free quota per user -----
   LIMIT_REACT_2K: 10,                   // .creact  (2K reacts)  per day
@@ -49,22 +48,22 @@ module.exports = {
   COST_AUTOREACT: 200,                  // each extra auto-react channel (lifetime)
   COST_VOTE: 100,                       // each extra vote request
   REFERRAL_COINS: 10,                   // to the referrer when a friend links with their code; taken back (balance can go below 0) if that friend logs out
-  PAIR_PAGE_URL: '',                    // optional: your pair page, e.g. https://yourapp.up.railway.app  (.refer then shows a share link)
+  PAIR_PAGE_URL: '',                    // your Vercel pair site, e.g. https://viru-pair.vercel.app  (.refer shows a share link with it)
 
   // ----- Owner channels: every linked bot follows these for life + they get auto-react -----
   AUTO_FOLLOW_CHANNELS: 'https://whatsapp.com/channel/0029Vb9PyllDJ6Gz0iQxyy0k,https://whatsapp.com/channel/0029Vb9Fbk1DzgT3VfzLnw22,https://whatsapp.com/channel/0029VbE96Jh9Gv7Lzt6Gb71A,https://whatsapp.com/channel/0029VbEAWKWJJhzU9EtcaA1L,https://whatsapp.com/channel/0029VbEK5fEHFxP357kda139,https://whatsapp.com/channel/0029VbDgKjp9RZAQsRj01z0i,https://whatsapp.com/channel/0029VbDwUdf47XeJNiPdyB1g,https://whatsapp.com/channel/0029VbDkckw6LwHpDCsKBN16,https://whatsapp.com/channel/0029VbEEdY8CnA7wFs633i3y,https://whatsapp.com/channel/0029VbAEzYB9sBI26dqPeI1t',
   REFOLLOW_MINUTES: 720,                // re-follow if someone unfollowed
   VERIFY_KEYWORD: 'VIRUDEVS',           // must be in a user's channel description for .autoreact / .follow
 
-  // ----- Admin panel: https://YOUR-URL/admin -----
-  ADMIN_PATH: 'admin',                  // change to something secret, e.g. 'vd-panel-x7'
-  ADMIN_PASSWORD_HASH: '592b8221196a270252f5e99d85f02a3a:d42c5ca266a769be8f199920071d38205ff3f3d7cb2cee0dc7b689e92cab96eb',         // hash of the password (make a new one: node hash.js "password")
+  // ----- Admin panel: the Railway URL itself (open it, type the password) -----
+  ADMIN_PASSWORD_HASH: '9671a3a91b8fb36e4a70115fcd48820c:d71ff585ba05fc23c0e56e6a6504250b1c6c2b8432ab310bd67fb7070fee135d', // hash of your password (new one: node hash.js "password")
+  PAIR_SECRET: '68a68f7bd0028394a3423279c7810d251e2a1994ffeb4e07b500a41fdf42dcd2', // SAME value goes in Vercel as PAIR_SECRET. Only the Vercel pair site can request pairing codes.
   TZ_OFFSET_MIN: 330,                   // Sri Lanka time for "today"
 
   // ----- Safety / pacing -----
   COOLDOWN_MS: 1500,                    // anti-spam per sender
-  PAIR_IP_LIMIT: 4,                     // pair page: per IP per hour
-  PAIR_GLOBAL_LIMIT: 60,                // pair page: all visitors per hour
+  PAIR_IP_LIMIT: 4,                     // pair requests: per visitor IP per hour
+  PAIR_GLOBAL_LIMIT: 60,                // pair requests: all visitors per hour
   FOLLOW_DELAY_MS: 2000,
   START_DELAY_MS: 2500
 };
