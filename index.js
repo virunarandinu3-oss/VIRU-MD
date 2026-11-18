@@ -23,12 +23,12 @@ const ALLOWED = new Map(String(E.ALLOWED_EMOJIS || '❤️,👍,😂,😮,😢,�
 const ALLOWED_LIST = [...ALLOWED.values()];
 const onlyAllowed = (str, d) => { const r = String(str || '').split(',').map(x => ALLOWED.get(strip(x.trim()))).filter(Boolean); return (r.length ? r : d).join(','); };
 const EMO_REACT = onlyAllowed(E.DEFAULT_REACT_EMOJIS, ALLOWED_LIST.slice(0, 3)), EMO_AUTO = onlyAllowed(E.DEFAULT_AUTOREACT_EMOJIS, ALLOWED_LIST.slice(0, 5)); // defaults can never contain an unsupported emoji
-const FOLLOW_UNLOCK = N('FOLLOW_UNLOCK_USERS', 50), PUBLIC_COUNT = String(E.SHOW_PUBLIC_COUNT) === 'true';
+const FOLLOW_UNLOCK = N('FOLLOW_UNLOCK_USERS', 50);
 const CHANNELS = (E.AUTO_FOLLOW_CHANNELS || '').split(',').map(x => x.trim().split('/channel/').pop().split(/[?/]/)[0]).filter(Boolean);
 const PAIR_IP_LIMIT = N('PAIR_IP_LIMIT', 4), PAIR_GLOBAL_LIMIT = N('PAIR_GLOBAL_LIMIT', 60);
 const FOLLOW_DELAY = N('FOLLOW_DELAY_MS', 2000), START_DELAY = N('START_DELAY_MS', 2500);
 const crypto = require('crypto');
-const ADMIN_PATH = '/' + (E.ADMIN_PATH || 'admin').replace(/^\/+|\/+$/g, '');
+const PAIR_SECRET = String(E.PAIR_SECRET || ''); // shared with the Vercel pair site; the ONLY way to request a pairing code
 const ADMIN_HASH = E.ADMIN_PASSWORD_HASH || '', KEYWORD = (E.VERIFY_KEYWORD || 'VIRUDEVS').toUpperCase(), KEYS = KEYWORD.split(',').map(k => k.replace(/[^A-Z0-9]/g, '')).filter(Boolean), OWNER_NAME = E.OWNER_NAME || 'VIRU DEV';
 const COOLDOWN = N('COOLDOWN_MS', 1500), REFOLLOW_MIN = N('REFOLLOW_MINUTES', 720), LIMIT_PAIR = N('LIMIT_PAIR', 3), TZ = N('TZ_OFFSET_MIN', 330);
 const SECRET_KEY = crypto.createHash('sha256').update(SECRET + ':' + ADMIN_HASH).digest('hex');
@@ -465,26 +465,25 @@ async function handle(sock, id, m) {
 
 // ---------- Secure web server (pair page) ----------
 const SEC = { 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'Referrer-Policy': 'no-referrer',
-  'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex', 'Strict-Transport-Security': 'max-age=31536000',
+  'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex', 'Cross-Origin-Opener-Policy': 'same-origin', 'Cross-Origin-Resource-Policy': 'same-origin', 'Permissions-Policy': 'camera=(), microphone=(), geolocation=()', 'Strict-Transport-Security': 'max-age=31536000',
   'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" };
 const hits = new Map();
 setInterval(() => hits.clear(), 3600e3).unref();
 const tooMany = (k, max) => { const n = (hits.get(k) || 0) + 1; hits.set(k, n); return n > max; };
 const FC = new Map(); const file = f => FC.get(f) || (FC.set(f, fs.readFileSync(path.join(__dirname, 'public', f))), FC.get(f));
-const PAGES = { '/': ['index.html', 'text/html; charset=utf-8'], '/app.js': ['app.js', 'text/javascript'] };
 
 const sign = x => crypto.createHmac('sha256', SECRET_KEY).update(x).digest('hex');
 const eq = (a, b) => crypto.timingSafeEqual(crypto.createHash('sha256').update(String(a)).digest(), crypto.createHash('sha256').update(String(b)).digest());
 const adminOk = pw => { try { const [salt, h] = ADMIN_HASH.split(':'); return crypto.timingSafeEqual(crypto.scryptSync(String(pw), salt, 32), Buffer.from(h, 'hex')); } catch { return false; } };
-const authed = req => { const m = /vd_admin=(\d+)\.([a-f0-9]{64})/.exec(req.headers.cookie || ''); return !!m && +m[1] > Date.now() && eq(sign(m[1]), m[2]); };
-const locks = new Map();
+const authed = req => { const m = /__Host-vd_admin=(\d+)\.([a-f0-9]{64})/.exec(req.headers.cookie || ''); return !!m && +m[1] > Date.now() && eq(sign(m[1]), m[2]); };
+const locks = new Map(); let gfail = 0; setInterval(() => { gfail = 0; }, 3600e3).unref(); // global failed-login counter: every wrong guess makes the next ones slower
 const readBody = req => new Promise(r => { let b = ''; req.on('data', d => { b += d; if (b.length > 2048) req.destroy(); }); req.on('end', () => { try { r(JSON.parse(b || '{}')); } catch { r({}); } }); });
-const cookie = (v, age) => `vd_admin=${v}; HttpOnly; Secure; SameSite=Strict; Path=${ADMIN_PATH}; Max-Age=${age}`;
+const cookie = (v, age) => `__Host-vd_admin=${v}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${age}`;
 
 async function adminRoute(req, res, url, send) {
-  const sub = url.slice(ADMIN_PATH.length) || '/', J = o => send(200, JSON.stringify(o));
-  if (req.method === 'GET' && sub === '/') return send(200, file('admin.html').toString().replace(/__P__/g, ADMIN_PATH), 'text/html; charset=utf-8');
-  if (req.method === 'GET' && sub === '/app.js') return send(200, file('admin.js'), 'text/javascript');
+  const sub = url, J = o => send(200, JSON.stringify(o));
+  if (req.method === 'GET' && sub === '/') return send(200, file('admin.html'), 'text/html; charset=utf-8');
+  if (req.method === 'GET' && sub === '/admin.js') return send(200, file('admin.js'), 'text/javascript');
   if (req.headers['x-admin'] !== '1') return send(403, '{"error":"Forbidden"}');
   if (req.method === 'POST') try { if (new URL(req.headers.origin || '').host !== req.headers.host) throw 0; } catch { return send(403, '{"error":"Forbidden"}'); }
   const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',').pop().trim();
@@ -497,7 +496,7 @@ async function adminRoute(req, res, url, send) {
       res.writeHead(200, { ...SEC, 'Content-Type': 'application/json', 'Set-Cookie': cookie(`${exp}.${sign(exp)}`, 43200) }); return res.end('{"ok":true}');
     }
     if (++lk.n >= 5) { lk.until = Date.now() + 15 * 60000; lk.n = 0; } locks.set(ip, lk);
-    await sleep(800); return send(401, '{"error":"Wrong password"}');
+    gfail++; await sleep(800 + Math.min(gfail * 150, 5000)); return send(401, '{"error":"Wrong password"}');
   }
   if (!authed(req)) return send(401, '{"error":"Unauthorized"}');
   if (tooMany('adm' + ip, 3000)) return send(429, '{}');
@@ -534,34 +533,30 @@ async function adminRoute(req, res, url, send) {
   send(404, '{"error":"Not found"}');
 }
 
+// Pairing requests: ONLY from the Vercel pair site. Signed (HMAC) + 30s window + one-time. Anything else gets a plain 404, so the endpoint looks like it does not exist.
+const NF = '{"error":"Not found"}', seen = new Map();
+setInterval(() => { const t = Date.now(); for (const [k, v] of seen) if (t - v > 60000) seen.delete(k); }, 30000).unref();
+async function internalPair(req, res, send) {
+  const ts = +req.headers['x-ts'], sig = String(req.headers['x-sig'] || '');
+  if (PAIR_SECRET.length < 32 || !Number.isFinite(ts) || Math.abs(Date.now() - ts) > 30000 || !/^[a-f0-9]{64}$/.test(sig)) return send(404, NF);
+  const raw = await new Promise(r => { let b = ''; req.on('data', d => { b += d; if (b.length > 600) req.destroy(); }); req.on('end', () => r(b)); req.on('error', () => r('')); });
+  if (!eq(sig, crypto.createHmac('sha256', PAIR_SECRET).update(ts + '.' + raw).digest('hex')) || seen.has(sig)) return send(404, NF);
+  seen.set(sig, Date.now());
+  let j; try { j = JSON.parse(raw); } catch { return send(400, '{"error":"Bad request"}'); }
+  const ip = /^[0-9a-fA-F:.]{3,45}$/.test(j.ip || '') ? j.ip : 'unknown'; // the visitor's real IP, signed by the Vercel server
+  if (tooMany('ip' + ip, PAIR_IP_LIMIT) || tooMany('all', PAIR_GLOBAL_LIMIT)) return send(429, '{"error":"Too many attempts. Try again in an hour."}');
+  try { await pairNew(String(j.number || '').replace(/\D/g, ''), String(j.ref || '')); send(200, JSON.stringify({ code: PAIR_CODE })); }
+  catch (e) { console.error('pair failed:', e.message); send(400, JSON.stringify({ error: /number|linked|full|blocked|starting|referral/.test(e.message) ? e.message : /Firebase|URL/.test(e.message) ? 'Database error. The owner must check the Firebase settings.' : 'Could not create a pairing code. Try again.' })); }
+}
+
+// The Railway URL is the admin panel and nothing else (+ /health). There is no public pair page or pair endpoint here.
 http.createServer((req, res) => {
   const send = (code, body, type = 'application/json') => { res.writeHead(code, { ...SEC, 'Content-Type': type }); res.end(body); };
   const url = req.url.split('?')[0];
-  if (url === ADMIN_PATH || url.startsWith(ADMIN_PATH + '/')) return adminRoute(req, res, url, send).catch(() => send(500, '{"error":"Server error"}'));
+  if (req.method === 'POST' && url === '/internal/pair') return internalPair(req, res, send).catch(() => send(404, NF));
+  if (url === '/' || url === '/admin.js' || url.startsWith('/api/')) return adminRoute(req, res, url, send).catch(() => send(500, '{"error":"Server error"}'));
   if (req.method === 'GET' && url === '/health') return send(200, 'OK', 'text/plain');
-  if (req.method === 'GET' && PAGES[url]) return send(200, file(PAGES[url][0]), PAGES[url][1]);
-  if (req.method === 'GET' && url === '/api/stats') {
-    const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',').pop().trim();
-    if (tooMany('st' + ip, 600)) return send(429, '{}');
-    return send(200, JSON.stringify(PUBLIC_COUNT ? { online: S.size, max: MAX } : { live: READY })); // bot count stays private unless SHOW_PUBLIC_COUNT is true
-  }
-  if (req.method === 'POST' && url === '/api/pair') {
-    try { if (new URL(req.headers.origin || '').host !== req.headers.host) throw 0; } catch { return send(403, '{"error":"Forbidden"}'); }
-    const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',').pop().trim();
-    if (tooMany('ip' + ip, PAIR_IP_LIMIT) || tooMany('all', PAIR_GLOBAL_LIMIT)) return send(429, '{"error":"Too many attempts. Try again in an hour."}');
-    let body = '';
-    req.on('data', d => { body += d; if (body.length > 600) req.destroy(); });
-    req.on('end', async () => {
-      try {
-        const j = JSON.parse(body);
-        if (j.website) return send(400, '{"error":"Bad request"}'); // honeypot
-        await pairNew(String(j.number || '').replace(/\D/g, ''), String(j.ref || ''));
-        send(200, JSON.stringify({ code: PAIR_CODE }));
-      } catch (e) { console.error('pair failed:', e.message); send(400, JSON.stringify({ error: /number|linked|full|blocked|starting|referral/.test(e.message) ? e.message : /Firebase|URL/.test(e.message) ? 'Database error. The owner must check the Firebase settings.' : 'Could not create a pairing code. Try again.' })); }
-    });
-    return;
-  }
-  send(404, '{"error":"Not found"}');
+  send(404, NF);
 }).listen(PORT, () => console.log('Web server listening on port ' + PORT));
 
 // ---------- Boot ----------
