@@ -184,11 +184,14 @@ async function onOpen(sock, id) {
 const dayKey = (id, cmd) => `limits/${id}/${dayStr()}/${cmd}`;
 const canUse = async (p, max) => ((await dbGet(p)) || 0) < max;
 const markUse = async p => dbSet(p, ((await dbGet(p)) || 0) + 1);
+const BAD = /err|fail|invalid|denied|unauthor|forbid|reject|not.?found|limit|expired|wrong|unknown/i;
 async function call(base, key, path, params) {
   if (!base || !key) throw new Error('API not configured');
   const r = await fetch(`${base.replace(/\/$/, '')}${path}?${new URLSearchParams(params)}`, { signal: AbortSignal.timeout(60000) });
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok || j.status === 'ERROR' || j.success === false || j.error) throw new Error(String(j.message || j.error || 'API error').slice(0, 120));
+  const j = await r.json().catch(() => ({})), st = String(j.status ?? '').trim(), msg = String(j.message ?? j.error ?? j.detail ?? '').trim();
+  console.log('API', path.replace('/api/owner/', ''), r.status, JSON.stringify(j).slice(0, 200)); // see the real API answers in the Railway logs
+  const good = j.success === true || j.ok === true || /^(ok|success|succeeded|done|queued|started|added|deleted|removed|processing|running|completed|accepted|pending|scheduled|true)$/i.test(st);
+  if (!r.ok || j.success === false || j.ok === false || j.error || BAD.test(st) || (!good && BAD.test(msg))) throw new Error((msg || st || 'API error (' + r.status + ')').slice(0, 120));
   return j;
 }
 // Owner API: https://<OWNER_API_BASE>/api/owner/<endpoint>?owner_key=...  (vote, react-2000, react-5000, auto-react-2000, auto-react-5000)
@@ -300,7 +303,12 @@ const isCh = l => /whatsapp\.com\/channel\//.test(l || '');
 const isPost = l => /whatsapp\.com\/channel\/[\w-]+\/\d+/.test(l || '');
 const codeOf = l => l.split('/channel/')[1].split(/[?/]/)[0];
 const postLink = l => { const m = /whatsapp\.com\/channel\/([\w-]+)\/(\d+)/.exec(l); return `https://whatsapp.com/channel/${m[1]}/${m[2]}`; };
-const emojisOf = t => t.join(',').replace(/,+/g, ',').replace(/^,|,$/g, '');
+const SEG = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+const emojisOf = t => { // "❤️🔥👍", "❤️, 🔥 ,👍", "❤️ 🔥" -> "❤️,🔥,👍" (each emoji once, max 10)
+  const out = []; for (const { segment: g } of SEG.segment(t.join(' '))) if (/\p{Extended_Pictographic}|\p{Regional_Indicator}|\u20E3/u.test(g) && !out.includes(g)) out.push(g);
+  return out.slice(0, 10).join(',');
+};
+const noEmoji = (R, cmd) => R('😕 NO EMOJI FOUND 😕', '⚠️ I could not find any emoji in your message.', `💡 Example: ${PREFIX}${cmd} <link> ❤️🔥👍`);
 const chLink = l => 'https://whatsapp.com/channel/' + codeOf(l); // clean link (no ?mode=..., no extra text) for the APIs
 const getCfg = async u => { if (!cfg.has(u)) { if (cfg.size > 3000) cfg.clear(); cfg.set(u, (await dbGet('cfg/' + u)) || {}); } return cfg.get(u); };
 const saveCfg = (u, c) => { cfg.set(u, c); return Object.keys(c).length ? dbSet('cfg/' + u, c) : dbDel('cfg/' + u); };
@@ -336,6 +344,7 @@ async function senderOf(sock, id, m) { // WhatsApp now uses LIDs; find the real 
   return num(who);
 }
 
+const PUBLIC_CMDS = new Set(['menu', 'alive', 'ping', 'pair', 'owner']);
 async function handle(sock, id, m) {
   const jid = m.key.remoteJid;
   if (!m.message || !jid || jid === 'status@broadcast' || jid.endsWith('@newsletter')) return;
@@ -346,6 +355,7 @@ async function handle(sock, id, m) {
   const now = Date.now(); if (now - (lastCmd.get(u) || 0) < COOLDOWN) return;
   lastCmd.set(u, now); if (lastCmd.size > 5000) lastCmd.clear();
   const [cmd, ...a] = txt.slice(PREFIX.length).trim().split(/\s+/), cm = cmd.toLowerCase(), o = {};
+  if (!PUBLIC_CMDS.has(cm) && u !== id) return; // someone else texting this bot can only use the public commands
   const R = (title, ...lines) => sock.sendMessage(jid, { text: box(title, ...lines) }, Q);
   if (['creact', 'creact2', 'vote', 'autoreact', 'follow', 'followers', 'coins', 'wallet', 'balance', 'refer', 'referral'].includes(cm) && !KNOWN.has(u) && !staff(u))
     return R('🔒 LOCKED 🔒', `🚫 *${PREFIX}${cm}* is for linked users only.`, '', `🔗 Send *${PREFIX}pair <your number>*`, '📲 to link your WhatsApp first.');
@@ -368,7 +378,8 @@ async function handle(sock, id, m) {
         await R('👑 OWNER 👑', `👤 *${OWNER_NAME}*`, '', '👆 Tap *Message* on the contact card', '💬 to chat with the owner.'); break;
       case 'creact': case 'creact2': { const big = cm === 'creact2', amt = big ? 5000 : 2000, kind = big ? 'r5k' : 'r2k', free = big ? L.r5k : L.r2k, cost = big ? COST.r5k : COST.r2k;
         if (!isPost(a[0])) return R(big ? '💥 USAGE 💥' : '🚀 USAGE 🚀', `📌 ${PREFIX}${cm} <post link> <emojis>`, `🎯 Sends *${amt / 1000}K* reacts`, `🎁 Free ${free} per day, then ${cost} coins`, '🔗 Link must include the post id.');
-        const em = emojisOf(a.slice(1)) || EMO_REACT, q = await quota(u, kind, free, cost);
+        const em = emojisOf(a.slice(1)) || EMO_REACT; if (a.length > 1 && !emojisOf(a.slice(1))) return noEmoji(R, cm);
+        const q = await quota(u, kind, free, cost);
         if (q.block) return R('⛔ LIMIT REACHED ⛔', ...q.block);
         await reactApi(amt, postLink(a[0]), em); await q.commit();
         Object.assign(o, { reacts: amt, link: postLink(a[0]) });
@@ -394,6 +405,7 @@ async function handle(sock, id, m) {
         const link = chLink(a[0]), code = codeOf(link), k = arKey(u, code);
         if (AR.has(k)) return R('🤖 AUTO REACT 🤖', '✅ Already active on this channel.');
         const em = emojisOf(a.slice(1)) || EMO_AUTO; let q;
+        if (a.length > 1 && !emojisOf(a.slice(1))) return noEmoji(R, 'autoreact');
         if (staff(u) || freeSlot()) q = { paid: false, commit: async () => {}, line: staff(u) ? '👑 Staff • unlimited' : '🎁 Free channel slot' };
         else { const bal = await getCoins(u);
           if (bal < COST.auto) return R('⛔ LIMIT REACHED ⛔', '📊 Your free channel is already in use', `🪙 One more channel needs ${COST.auto} coins • you have ${bal}`, '', `🛑 Remove it first : *${PREFIX}autoreact off*`, `👥 Or earn coins : *${PREFIX}refer*`);
