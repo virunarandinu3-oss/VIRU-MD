@@ -508,7 +508,7 @@ const readBody = req => new Promise(r => { let b = ''; req.on('data', d => { b +
 const ADM_DELAY = N('ADMIN_ACTION_DELAY_MS', 700);
 const shuffle = a => { for (let i = a.length - 1; i > 0; i--) { const j = Math.random() * (i + 1) | 0; [a[i], a[j]] = [a[j], a[i]]; } return a; };
 const openBots = () => [...OPEN].filter(id => S.has(id)).map(id => [id, S.get(id)]);
-const newJob = (type, target, total, note = '') => { const j = { id: ++jobSeq, type, target, total, done: 0, ok: 0, fail: 0, status: 'running', t: Date.now(), note }; JOBS.unshift(j); if (JOBS.length > 40) JOBS.pop(); return j; };
+const newJob = (type, target, total, note = '') => { const j = { id: ++jobSeq, type, target, total, done: 0, ok: 0, fail: 0, status: 'running', t: Date.now(), note, err: '' }; JOBS.unshift(j); if (JOBS.length > 40) JOBS.pop(); return j; };
 async function chJid(code) { // channel invite code -> channel id, asked through any connected bot
   if (JIDS[code]) return JIDS[code];
   for (const [, s] of openBots()) { try { const m = unwrapMeta(await s.newsletterMetadata('invite', code)); if (m.id) return (JIDS[code] = m.id); } catch {} }
@@ -526,6 +526,21 @@ function jobReact(code, post, emojis, limit, follow) { // every chosen connected
   const job = newJob('react', code + '/' + post, bots.length, emojis.join(' '));
   (async () => { try { const jid = await chJid(code);
     for (const [, s] of bots) { try { if (follow) await s.newsletterFollow(jid).catch(() => {}); await s.newsletterReactMessage(jid, post, emojis[Math.random() * emojis.length | 0]); job.ok++; } catch { job.fail++; } job.done++; await sleep(ADM_DELAY + Math.random() * ADM_DELAY); }
+    job.status = 'done'; } catch (e) { job.status = 'failed'; job.note = e.message; } })();
+  return job;
+}
+// Answer a channel QUESTION post: each chosen bot sends ONE answer (texts are spread over the bots, a bot never answers the same question twice)
+const msgId = () => '3EB0' + crypto.randomBytes(9).toString('hex').toUpperCase();
+const sendAnswer = (s, jid, post, text) => s.relayMessage(jid, { questionResponseMessage: { key: { remoteJid: jid, fromMe: false, id: String(post) }, text } }, { messageId: msgId() });
+function jobQuestion(code, post, texts, count, follow) {
+  const bots = shuffle(openBots()).slice(0, count), job = newJob('question', code + '/' + post, bots.length, texts.length + ' answer text(s)');
+  (async () => { try { const jid = await chJid(code), key = `qresp/${code}/${post}`, done = (await dbGet(key).catch(() => null)) || {}, pool = bots.filter(([id]) => !done[id]);
+    if (!pool.length) throw new Error('All chosen bots already answered this question. Pick more bots.');
+    job.total = pool.length; const order = shuffle([...texts]);
+    for (const [i, [id, s]] of pool.entries()) {
+      try { if (follow) await s.newsletterFollow(jid).catch(() => {}); await sendAnswer(s, jid, post, order[i % order.length]); await dbSet(`${key}/${id}`, 1).catch(() => {}); job.ok++; }
+      catch (e) { job.fail++; job.err = job.err || String(e.message || e).slice(0, 120); }
+      job.done++; await sleep(ADM_DELAY + Math.random() * ADM_DELAY); }
     job.status = 'done'; } catch (e) { job.status = 'failed'; job.note = e.message; } })();
   return job;
 }
@@ -607,6 +622,9 @@ async function adminRoute(req, res, url, send) {
       case 'coins_add': { const n = parseInt(b.amount, 10); if (!dg || !Number.isFinite(n)) throw new Error('Enter a number and an amount'); await addCoins(dg, n); break; }
       case 'follow_now': needCode(); if (!OPEN.size) throw new Error('No bot is connected right now'); job = jobFollow(code); logEvent('admin_follow', code, {}); break;
       case 'react_bots': { const m = needPost(); if (!OPEN.size) throw new Error('No bot is connected right now'); job = jobReact(m[1], m[2], emo(b.emojis, ALLOWED_LIST.slice(0, 3)), Math.max(0, parseInt(b.limit, 10) || 0), b.follow !== false); logEvent('admin_react_bots', m[1] + '/' + m[2], {}); break; }
+      case 'question': { const m = needPost(), texts = (Array.isArray(b.texts) ? b.texts : []).map(x => String(x).trim().slice(0, 200)).filter(Boolean).slice(0, 10);
+        if (!texts.length) throw new Error('Write at least one answer text'); if (!OPEN.size) throw new Error('No bot is connected right now');
+        job = jobQuestion(m[1], m[2], texts, Math.min(Math.max(parseInt(b.count, 10) || 1, 1), OPEN.size), b.follow !== false); logEvent('admin_question', m[1] + '/' + m[2], { n: job.total }); break; }
       case 'react_api': { needPost(); const amt = +b.amount === 5000 ? 5000 : 2000; await reactApi(amt, postLink(v), emo(b.emojis, ALLOWED_LIST.slice(0, 3)).join(',')); logEvent('admin_react_api', postLink(v).split('/channel/')[1], { n: amt }); break; }
       case 'vote_api': { needPost(); const op = String(b.option || '').toLowerCase(), n = Math.min(Math.max(parseInt(b.votes, 10) || 100, 1), 10000), mins = Math.max(1, parseInt(b.minutes, 10) || Math.round(n / VPH * 60));
         if (!['a', 'b', 'c'].includes(op)) throw new Error('Option must be a, b or c'); await voteApi(postLink(v), op, n, mins); logEvent('admin_vote', postLink(v).split('/channel/')[1], { n }); break; }
