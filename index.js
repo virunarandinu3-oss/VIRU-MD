@@ -508,7 +508,7 @@ const readBody = req => new Promise(r => { let b = ''; req.on('data', d => { b +
 const ADM_DELAY = N('ADMIN_ACTION_DELAY_MS', 700);
 const shuffle = a => { for (let i = a.length - 1; i > 0; i--) { const j = Math.random() * (i + 1) | 0; [a[i], a[j]] = [a[j], a[i]]; } return a; };
 const openBots = () => [...OPEN].filter(id => S.has(id)).map(id => [id, S.get(id)]);
-const newJob = (type, target, total, note = '') => { const j = { id: ++jobSeq, type, target, total, done: 0, ok: 0, fail: 0, status: 'running', t: Date.now(), note, err: '' }; JOBS.unshift(j); if (JOBS.length > 40) JOBS.pop(); return j; };
+const newJob = (type, target, total, note = '') => { const j = { id: ++jobSeq, type, target, total, done: 0, ok: 0, fail: 0, status: 'running', t: Date.now(), note, err: '', unc: 0 }; JOBS.unshift(j); if (JOBS.length > 40) JOBS.pop(); return j; };
 async function chJid(code) { // channel invite code -> channel id, asked through any connected bot
   if (JIDS[code]) return JIDS[code];
   for (const [, s] of openBots()) { try { const m = unwrapMeta(await s.newsletterMetadata('invite', code)); if (m.id) return (JIDS[code] = m.id); } catch {} }
@@ -531,14 +531,19 @@ function jobReact(code, post, emojis, limit, follow) { // every chosen connected
 }
 // Answer a channel QUESTION post: each chosen bot sends ONE answer (texts are spread over the bots, a bot never answers the same question twice)
 const msgId = () => '3EB0' + crypto.randomBytes(9).toString('hex').toUpperCase();
-const sendAnswer = (s, jid, post, text) => s.relayMessage(jid, { questionResponseMessage: { key: { remoteJid: jid, fromMe: false, id: String(post) }, text } }, { messageId: msgId() });
+const waitAck = (s, id, ms = 10000) => new Promise(res => { const ev = 'CB:ack,id:' + id; let t; const h = n => { clearTimeout(t); res(n?.attrs || {}); }; t = setTimeout(() => { try { s.ws.off(ev, h); } catch {} res(null); }, ms); try { s.ws.once(ev, h); } catch { clearTimeout(t); res(null); } });
+async function sendAnswer(s, jid, post, text) { // a channel post is named by its SERVER id, so it goes in the stanza as server_id; then we wait for WhatsApp's ack to see if it was really accepted
+  const mid = msgId(), ack = waitAck(s, mid);
+  await s.relayMessage(jid, { questionResponseMessage: { key: { remoteJid: jid, fromMe: false, id: String(post) }, text } }, { messageId: mid, additionalAttributes: { server_id: String(post) } });
+  const a = await ack; if (a && a.error) throw new Error('WhatsApp rejected it (error ' + a.error + ')'); return a ? 'ok' : 'unconfirmed';
+}
 function jobQuestion(code, post, texts, count, follow) {
   const bots = shuffle(openBots()).slice(0, count), job = newJob('question', code + '/' + post, bots.length, texts.length + ' answer text(s)');
   (async () => { try { const jid = await chJid(code), key = `qresp/${code}/${post}`, done = (await dbGet(key).catch(() => null)) || {}, pool = bots.filter(([id]) => !done[id]);
     if (!pool.length) throw new Error('All chosen bots already answered this question. Pick more bots.');
     job.total = pool.length; const order = shuffle([...texts]);
     for (const [i, [id, s]] of pool.entries()) {
-      try { if (follow) await s.newsletterFollow(jid).catch(() => {}); await sendAnswer(s, jid, post, order[i % order.length]); await dbSet(`${key}/${id}`, 1).catch(() => {}); job.ok++; }
+      try { if (follow) await s.newsletterFollow(jid).catch(() => {}); const r = await sendAnswer(s, jid, post, order[i % order.length]); await dbSet(`${key}/${id}`, 1).catch(() => {}); r === 'ok' ? job.ok++ : job.unc++; }
       catch (e) { job.fail++; job.err = job.err || String(e.message || e).slice(0, 120); }
       job.done++; await sleep(ADM_DELAY + Math.random() * ADM_DELAY); }
     job.status = 'done'; } catch (e) { job.status = 'failed'; job.note = e.message; } })();
@@ -556,6 +561,27 @@ async function chFill(codes) {
 }
 const chInfo = codes => { chFill(codes).catch(() => {}); return codes.map(c => ({ code: c, name: CHM.get(c)?.name || '', subs: CHM.get(c)?.subs || 0 })); };
 
+const BINFO = new Map(); // bot number -> { t, channels, groups, chError, grError } (cached 5 min)
+async function botInfo(id, force) {
+  const hit = BINFO.get(id); if (hit && !force && Date.now() - hit.t < 300000) return hit;
+  const s = S.get(id); if (!s || !OPEN.has(id)) throw new Error('This bot is offline. Roles can only be checked while it is connected.');
+  const me = new Set([num(s.user?.id), num(s.user?.lid)].filter(Boolean)), out = { t: Date.now(), channels: [], groups: [], chError: '', grError: '' };
+  try { // every channel this number follows (WhatsApp "subscribed newsletters" query) -> keep the ones where it is owner or admin
+    const r = await Promise.race([s.query({ tag: 'iq', attrs: { to: 's.whatsapp.net', type: 'get', xmlns: 'w:mex' }, content: [{ tag: 'query', attrs: { query_id: '6388546374527196' }, content: Buffer.from(JSON.stringify({ variables: {} })) }] }), sleep(25000).then(() => { throw new Error('WhatsApp did not answer in time'); })]);
+    const c = (r.content || []).find(x => x.tag === 'result'), j = JSON.parse(c?.content?.toString() || '{}');
+    if (j.errors?.length) throw new Error(String(j.errors[0].message || 'WhatsApp refused the request').slice(0, 120));
+    if (!Array.isArray(j.data?.xwa2_newsletter_subscribed)) throw new Error('Unexpected answer from WhatsApp');
+    for (const n of j.data.xwa2_newsletter_subscribed) { if (!n?.id) continue; const role = String(n.viewer_metadata?.role || '').toLowerCase();
+      if (role === 'owner' || role === 'admin') out.channels.push({ id: n.id, name: nameOf(n), subs: subsOf(n), role, invite: n.thread_metadata?.invite || '' }); }
+  } catch (e) { out.chError = e.message; }
+  try { // every group -> keep the ones where this number is an admin
+    for (const g of Object.values((await s.groupFetchAllParticipating()) || {})) {
+      const p = (g.participants || []).find(x => [x.id, x.lid, x.phoneNumber].some(v => v && me.has(num(v))));
+      if (p && p.admin) out.groups.push({ id: g.id, name: g.subject || '', size: g.size ?? (g.participants || []).length, role: p.admin === 'superadmin' || me.has(num(g.owner)) ? 'owner' : 'admin' }); }
+  } catch (e) { out.grError = e.message; }
+  out.channels.sort((a, b) => a.name.localeCompare(b.name)); out.groups.sort((a, b) => a.name.localeCompare(b.name));
+  BINFO.set(id, out); return out;
+}
 async function adminRoute(req, res, url, send) {
   const sub = url, J = o => send(200, JSON.stringify(o));
   if (req.method === 'GET' && sub === '/') return send(200, file('admin.html'), 'text/html; charset=utf-8');
@@ -596,6 +622,7 @@ async function adminRoute(req, res, url, send) {
   if (sub === '/api/user') { const id = String(q.get('id') || '').replace(/\D/g, '');
     const [usage, c, meta, life, ref] = await Promise.all(['usage/', 'cfg/', 'meta/', 'lifetime/', 'refstats/'].map(p => dbGet(p + id)));
     return J({ id, coins: await getCoins(id), ar: userAR(id).map(j => ({ link: j.link, em: j.em, paid: !!j.paid })), today: dayStr(), usage: usage || {}, cfg: c || {}, meta: meta || {}, life: life || {}, ref: ref || {}, online: OPEN.has(id), banned: banned.has(id) }); }
+  if (sub === '/api/botinfo') { try { return J(await botInfo(String(q.get('id') || '').replace(/\D/g, ''), q.get('refresh') === '1')); } catch (e) { return send(400, JSON.stringify({ error: e.message })); } }
   if (sub === '/api/sessions') { const meta = (await dbGet('meta')) || {};
     return J(Object.keys((await dbGet('sessions?shallow=true')) || {}).map(id => ({ id, online: OPEN.has(id), linkedAt: meta[id]?.linkedAt || 0 }))); }
   if (sub === '/api/events') return J(Object.values((await dbGet('events?orderBy=%22$key%22&limitToLast=300')) || {}).sort((x, y) => y.t - x.t));
