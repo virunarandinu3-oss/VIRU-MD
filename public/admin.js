@@ -216,6 +216,20 @@ async function bot(id) {
         table(['Time', 'Command', 'Link', 'Count'], ev.slice(0, 100).map(e => [dt(e.t), '.' + e.c, e.l, fmt(e.n)]), { num: [3], wrap: [2] })));
   };
   sel.onchange = draw;
+  const infoBox = el('div', { class: 'card', style: 'margin-bottom:14px' }), H3 = t => el('h3', { style: 'margin:16px 0 6px' }, t);
+  const loadInfo = async force => {
+    const top = (...x) => [el('div', { class: 'hd' }, el('div', {}, el('h3', {}, 'Channels & groups where this number is admin'), el('div', { class: 'sub' }, 'Roles of this bot number, read live from WhatsApp')), ...x)];
+    if (!d.online) return infoBox.replaceChildren(...top(), el('div', { class: 'empty' }, 'This bot is offline. Roles can only be checked while it is connected.'));
+    infoBox.replaceChildren(...top(), el('div', { class: 'empty' }, 'Checking… this can take a few seconds'));
+    try { const r = await api('botinfo?id=' + id + (force ? '&refresh=1' : '')), own = r.channels.filter(x => x.role === 'owner'), adm = r.channels.filter(x => x.role === 'admin'), created = r.groups.filter(g => g.role === 'owner').length;
+      const ct = l => table(['Channel', 'Followers', 'Link'], l.map(x => [x.name || short(x.id, 18), x.subs ? fmt(x.subs) : '-', x.invite ? 'https://whatsapp.com/channel/' + x.invite : '-']), { num: [1], wrap: [2], empty: 'None' });
+      infoBox.replaceChildren(...top(btn('Check again', () => loadInfo(true), 'sm')), el('div', { class: 'note', style: 'margin-bottom:10px' }, 'Checked ' + ago(r.t) + ' (kept for 5 minutes)'),
+        el('div', { class: 'g' }, tile('Channels (owner)', fmt(own.length)), tile('Channels (admin)', fmt(adm.length)), tile('Groups (admin)', fmt(r.groups.length), created + ' created by this number')),
+        ...[r.chError && el('div', { class: 'note' }, '⚠ Channels could not be read: ' + r.chError), r.grError && el('div', { class: 'note' }, '⚠ Groups could not be read: ' + r.grError)].filter(Boolean),
+        H3('Channels where this number is the owner'), ct(own), H3('Channels where this number is an admin'), ct(adm),
+        H3('Groups where this number is an admin'), table(['Group', 'Members', 'Role'], r.groups.map(g => [g.name || short(g.id, 18), fmt(g.size), chip(g.role === 'owner' ? '★ Creator' : 'Admin', g.role === 'owner' ? 'warn' : '')]), { num: [1], empty: 'None' }));
+    } catch (e) { if (e.message !== 'Unauthorized') infoBox.replaceChildren(...top(btn('Try again', () => loadInfo(true), 'sm')), el('div', { class: 'empty' }, e.message)); }
+  };
   const coin = el('input', { placeholder: 'Coins (e.g. 50 or -50)', type: 'number', style: 'max-width:200px' });
   paint(my, head(id, btn('← Back', () => go('#/bots')), btn('Refresh', route)),
     el('div', { class: 'card', style: 'margin-bottom:14px' }, el('div', { class: 'row' }, status(d.online), d.banned ? chip('banned', 'bad') : null, el('span', { class: 'note' }, `Linked ${dt(d.meta.linkedAt)}`), el('span', { class: 'note' }, `Coins: ${fmt(d.coins)}`)),
@@ -225,8 +239,8 @@ async function bot(id) {
       el('div', { class: 'row' }, btn(d.banned ? 'Unban' : 'Ban', () => act({ op: 'ban', value: id, on: !d.banned }, d.banned ? 'Unbanned' : 'Banned', route), 'd'),
         d.online ? btn('Remove bot session', async () => { if (confirm('Logout ' + id + '?')) await act({ op: 'remove', value: id }, 'Bot removed', () => go('#/bots')); }, 'd') : null,
         coin, btn('Add coins', () => coin.value && act({ op: 'coins_add', value: id, amount: coin.value }, 'Coins updated', route)), el('span', { class: 'grow' }), sel)),
-    box);
-  draw();
+    infoBox, box);
+  draw(); loadInfo();
 }
 
 // ---------- Channels ----------
@@ -262,7 +276,7 @@ async function boost(my) {
   ta.oninput = nq.oninput = upd; upd();
   bq.onclick = doJob(bq, () => act({ op: 'question', value: fq.value, count: nq.value, texts: ta.value.split('\n'), follow: foq.checked }, 'Started', loadJobs));
   const loadJobs = async () => { const js = await api('jobs').catch(() => []); jobsBox.replaceChildren(...(js.length ? js.map(j => el('div', { class: 'job' }, el('div', { class: 'row' }, chip(j.type === 'follow' ? 'Follow' : j.type === 'question' ? 'Answer' : 'React'), el('span', { class: 'grow note', title: j.target }, short(j.target, 34) + (j.note && j.type !== 'follow' ? ' · ' + j.note : '')), chip(j.status === 'running' ? '… Running' : j.status === 'done' ? '✓ Done' : '✕ Failed', j.status === 'done' ? 'ok' : j.status === 'failed' ? 'bad' : 'warn')),
-    el('div', { class: 'note' }, `${j.done} / ${j.total} bots · ${j.ok} ok · ${j.fail} failed · ${ago(j.t)}${j.status === 'failed' && j.note ? ' · ' + j.note : ''}${j.fail && j.err ? ' · error: ' + j.err : ''}`), el('div', { class: 'meter' }, el('b', { style: `width:${j.total ? j.done / j.total * 100 : 100}%;background:var(--c1)` })))) : [el('div', { class: 'empty' }, 'No actions yet')]));
+    el('div', { class: 'note' }, `${j.done} / ${j.total} bots · ${j.ok} ok · ${j.fail} failed · ${ago(j.t)}${j.status === 'failed' && j.note ? ' · ' + j.note : ''}${j.unc ? ' · ' + j.unc + ' unconfirmed' : ''}${j.fail && j.err ? ' · error: ' + j.err : ''}`), el('div', { class: 'meter' }, el('b', { style: `width:${j.total ? j.done / j.total * 100 : 100}%;background:var(--c1)` })))) : [el('div', { class: 'empty' }, 'No actions yet')]));
     if (js.some(j => j.status === 'running') && my === tok) later(loadJobs, 2000); };
   const lab = (t, n) => [el('label', {}, t), n];
   paint(my, head('Boost', el('span', { class: 'chip ' + (o.online ? 'ok' : 'bad') }, (o.online ? '● ' : '○ ') + o.online + ' active bots'), btn('Refresh', route)),
